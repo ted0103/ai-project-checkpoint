@@ -140,10 +140,10 @@ class CheckpointTests(unittest.TestCase):
 
     def test_publish_resume_and_handoff_changes_do_not_drift(self):
         evidence = cp.publish(self.root, self.draft)
-        text = (self.root/"HANDOFF.md").read_text(); self.assertLessEqual(len(text.splitlines()),120); self.assertLessEqual(len(text.encode()),cp.MAX_HANDOFF)
+        text = (self.root/"HANDOFF.md").read_text(encoding="utf-8"); self.assertLessEqual(len(text.splitlines()),120); self.assertLessEqual(len(text.encode()),cp.MAX_HANDOFF)
         resumed=cp.resume(self.root); self.assertTrue(resumed["fresh"]); self.assertEqual(resumed["resume_status"],"fresh"); self.assertNotIn("metadata",resumed); self.assertEqual(resumed["goal"],"Ship v0.1."); self.assertEqual(resumed["next_action"],"Run the unit tests.")
         self.assertEqual(resumed["capabilities"],self.draft["capabilities"]); self.assertEqual(resumed["decisions"],self.draft["decisions"]); self.assertEqual(resumed["acceptance_criteria"],self.draft["acceptance_criteria"]); self.assertEqual(resumed["verification"],self.draft["verification"]); self.assertEqual(resumed["open_questions"],self.draft["open_questions"]); self.assertEqual(resumed["remainder"],self.draft["remainder"])
-        (self.root/"HANDOFF.md").write_text(text)
+        (self.root/"HANDOFF.md").write_text(text, encoding="utf-8")
         self.assertEqual(evidence["fingerprint"], cp.inspect(self.root)["fingerprint"])
         (self.root/"tracked.txt").write_text("drift")
         result=cp.resume(self.root); self.assertFalse(result["fresh"]); self.assertIn("tracked.txt", result["changed_paths"])
@@ -168,7 +168,7 @@ class CheckpointTests(unittest.TestCase):
         diverged=cp.resume(self.root); self.assertEqual(diverged["branch_relation"],"diverged"); self.assertEqual((diverged["ahead"],diverged["behind"]),(1,1)); self.assertEqual(set(diverged["changed_paths"]),{"other.txt","side.txt"})
 
     def test_manual_prose_and_metadata_edits_rejected(self):
-        cp.publish(self.root,self.draft); p=self.root/"HANDOFF.md"; text=p.read_text()
+        cp.publish(self.root,self.draft); p=self.root/"HANDOFF.md"; text=p.read_text(encoding="utf-8")
         with self.assertRaisesRegex(cp.CheckpointError,"prose was edited"): cp.parse_handoff(text.replace("Ship v0.1.","Ship v0.2."))
         line=next(x for x in text.splitlines() if x.startswith(cp.META_PREFIX)); token=line[len(cp.META_PREFIX):-4]
         with self.assertRaises(Exception): cp.parse_handoff(text.replace(token, ("A" if token[0] != "A" else "B") + token[1:], 1))
@@ -202,7 +202,7 @@ class CheckpointTests(unittest.TestCase):
 
     def test_references_plan_symlink_and_escape(self):
         (self.root/"PLAN.md").write_text("locked"); (self.root/"doc.md").write_text("doc")
-        draft={**self.draft,"references":["doc.md"]}; cp.publish(self.root,draft); self.assertEqual(cp.parse_handoff((self.root/"HANDOFF.md").read_text())["plan"],"PLAN.md")
+        draft={**self.draft,"references":["doc.md"]}; cp.publish(self.root,draft); self.assertEqual(cp.parse_handoff((self.root/"HANDOFF.md").read_text(encoding="utf-8"))["plan"],"PLAN.md")
         (self.root/"link.md").symlink_to("doc.md")
         for ref in ("link.md","../outside"):
             with self.assertRaises(cp.CheckpointError): cp.validate_refs(self.root,[ref])
@@ -212,7 +212,7 @@ class CheckpointTests(unittest.TestCase):
         with self.assertRaisesRegex(cp.CheckpointError,"symlinks"): cp.render(self.root,self.draft,cp.inspect(self.root))
 
     def test_required_sections_placeholders_secret_and_size_limits(self):
-        cp.publish(self.root,self.draft); text=(self.root/"HANDOFF.md").read_text()
+        cp.publish(self.root,self.draft); text=(self.root/"HANDOFF.md").read_text(encoding="utf-8")
         with self.assertRaisesRegex(cp.CheckpointError,"section"): cp.validate_handoff(text.replace("## Identity","## Missing"))
         with self.assertRaisesRegex(cp.CheckpointError,"placeholder"): cp.render(self.root,{**self.draft,"goal":"TODO"},cp.inspect(self.root))
         with self.assertRaisesRegex(cp.CheckpointError,"secret"): cp.render(self.root,{**self.draft,"goal":"api_key=supersecretvalue"},cp.inspect(self.root))
@@ -230,7 +230,7 @@ class CheckpointTests(unittest.TestCase):
     def test_draft_and_metadata_types_fail_cleanly(self):
         for draft in ([], {**self.draft,"decisions":"no"}, {**self.draft,"capabilities":[1]}, {**self.draft,"extra":1}):
             with self.assertRaises(cp.CheckpointError): cp.render(self.root,draft,cp.inspect(self.root))
-        cp.publish(self.root,self.draft); meta=cp.parse_handoff((self.root/"HANDOFF.md").read_text())
+        cp.publish(self.root,self.draft); meta=cp.parse_handoff((self.root/"HANDOFF.md").read_text(encoding="utf-8"))
         for change in ({"commit":3},{"manifest":{}},{"path_total":"1"},{"path_total":1},{"plan":"OTHER.md"},{"extra":1}):
             bad={**meta,**change}
             with self.assertRaises(cp.CheckpointError): cp.validate_metadata(bad)

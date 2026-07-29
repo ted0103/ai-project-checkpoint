@@ -430,7 +430,7 @@ def main(argv=None):
             with open(args.input, encoding="utf-8") as f: draft = json.load(f)
             evidence = publish(args.project, draft, args.approve_overwrite)
             result = {"published": True, **{k:evidence[k] for k in ("branch", "commit", "fingerprint", "path_total")}}
-        print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+        print(json.dumps(result, sort_keys=True))
     except (CheckpointError, OSError, ValueError, json.JSONDecodeError) as e:
         print(f"project-checkpoint: {e}", file=sys.stderr); return 2
     return 0
