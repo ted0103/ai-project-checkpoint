@@ -34,9 +34,11 @@ class CheckpointTests(unittest.TestCase):
         (self.root / "stage space.txt").write_text("s"); git(self.root, "add", "stage space.txt")
         (self.root / "delete.txt").write_text("d"); git(self.root, "add", "delete.txt"); git(self.root, "commit", "-qm", "more")
         (self.root / "delete.txt").unlink(); git(self.root, "mv", "stage space.txt", "renamed ü.txt")
-        (self.root / "line\nname.txt").write_text("x")
+        odd_name = "line\nname.txt" if os.name == "posix" else "line name.txt"
+        (self.root / odd_name).write_text("x")
         data = cp.inspect(self.root); codes = " ".join(i["status"] for i in data["manifest"])
-        self.assertGreaterEqual(data["path_total"], 4); self.assertIn("R", codes); self.assertIn("%0A", " ".join(i["path"] for i in data["manifest"]))
+        self.assertGreaterEqual(data["path_total"], 4); self.assertIn("R", codes)
+        if os.name == "posix": self.assertIn("%0A", " ".join(i["path"] for i in data["manifest"]))
 
     def test_staged_blob_identity_changes_evidence(self):
         (self.root/"tracked.txt").write_text("staged one\n"); git(self.root,"add","tracked.txt"); first=cp.inspect(self.root)

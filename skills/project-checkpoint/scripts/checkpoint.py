@@ -157,7 +157,7 @@ def discover(workspace):
             if marker.is_file():
                 superproject = run_git(p, "rev-parse", "--show-superproject-working-tree", text=True, check=False)
                 kind = "submodule" if not superproject.returncode and superproject.stdout.strip() else "worktree"
-            found.append({"path": str(rel) if rel.parts else ".", "kind": kind}); dirs[:] = [d for d in dirs if d != ".git"]
+            found.append({"path": rel.as_posix() if rel.parts else ".", "kind": kind}); dirs[:] = [d for d in dirs if d != ".git"]
             if len(found) >= 50: return {"candidates": found, "capped": True}
     return {"candidates": found, "capped": False}
 
