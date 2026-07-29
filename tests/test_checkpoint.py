@@ -289,11 +289,11 @@ class CheckpointTests(unittest.TestCase):
         resumed=cp.resume(self.root); self.assertEqual(resumed["schema"],1); self.assertTrue(resumed["fresh"]); self.assertEqual(resumed["capabilities"],[])
 
     def test_skill_manifest_without_yaml_dependency(self):
-        skill=Path(__file__).parents[1]/"skills/project-checkpoint/SKILL.md"; text=skill.read_text()
+        skill=Path(__file__).parents[1]/"skills/project-checkpoint/SKILL.md"; text=skill.read_text(encoding="utf-8")
         front=text.split("---",2)[1]
         self.assertIn("\nname: project-checkpoint\n",front); self.assertIn("\ndescription:",front)
         self.assertIn("save progress",front); self.assertIn("resume from HANDOFF.md",front); self.assertIn("checkpoint here",front); self.assertIn("checkpoint else",front); self.assertIn("workstream when the branch or discussion is ambiguous",front)
-        agent=(skill.parent/"agents/openai.yaml").read_text()
+        agent=(skill.parent/"agents/openai.yaml").read_text(encoding="utf-8")
         self.assertIn('display_name: "Project Checkpoint"',agent); self.assertIn('short_description: "Save portable, integrity-checked project state"',agent); self.assertIn('$project-checkpoint',agent)
         self.assertNotIn("python3 scripts/checkpoint.py",text); self.assertIn('<python> "<checkpoint.py>"',text); self.assertIn('<python> "<portable.py>"',text); self.assertIn("Python 3.10+",text); self.assertIn("another AI",text); self.assertIn("Reconcile every claim",text); self.assertIn("repository-verified",text); self.assertIn("potentially stale",text); self.assertIn("OS temporary directory outside",text); self.assertIn("verification_current",text)
         self.assertIn("two to four choices",text); self.assertIn("Name — one-line goal — evidence:",text); self.assertIn("Combine these",text); self.assertIn("limited to that scope",text)
