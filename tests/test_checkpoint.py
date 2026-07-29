@@ -24,7 +24,15 @@ class CheckpointTests(unittest.TestCase):
         git(self.root, "config", "user.email", "test@example.com"); git(self.root, "config", "user.name", "Test")
         (self.root / "tracked.txt").write_text("one\n"); git(self.root, "add", "."); git(self.root, "commit", "-qm", "initial")
         self.initial_branch=git(self.root,"branch","--show-current").stdout.strip().decode()
-        self.draft = {"goal":"Ship v0.1.", "current_state":"Implementation is active.", "decisions":["Use standard library."], "verification":["Unit test observed passing."], "risks":[], "next_action":"Run the unit tests."}
+        self.draft = {
+            "goal":"Ship v0.1.", "current_state":"Implementation is active.",
+            "capabilities":["built — Publish and resume checkpoints — evidence: tracked.txt"],
+            "decisions":["active — Use standard library — keeps installation portable."],
+            "acceptance_criteria":["The unit test suite passes."],
+            "verification":["Unit test observed passing."], "risks":[],
+            "open_questions":["Choose the release date."], "next_action":"Run the unit tests.",
+            "remainder":["Tag the release."],
+        }
 
     def tearDown(self): self.temp.cleanup()
 
@@ -132,23 +140,35 @@ class CheckpointTests(unittest.TestCase):
 
     def test_publish_resume_and_handoff_changes_do_not_drift(self):
         evidence = cp.publish(self.root, self.draft)
-        text = (self.root/"HANDOFF.md").read_text(); self.assertLessEqual(len(text.splitlines()),120); self.assertLessEqual(len(text.encode()),cp.MAX_HANDOFF)
-        resumed=cp.resume(self.root); self.assertTrue(resumed["fresh"]); self.assertNotIn("metadata",resumed); self.assertEqual(resumed["goal"],"Ship v0.1."); self.assertEqual(resumed["next_action"],"Run the unit tests.")
-        (self.root/"HANDOFF.md").write_text(text)
+        text = (self.root/"HANDOFF.md").read_text(encoding="utf-8"); self.assertLessEqual(len(text.splitlines()),120); self.assertLessEqual(len(text.encode()),cp.MAX_HANDOFF)
+        resumed=cp.resume(self.root); self.assertTrue(resumed["fresh"]); self.assertEqual(resumed["resume_status"],"fresh"); self.assertNotIn("metadata",resumed); self.assertEqual(resumed["goal"],"Ship v0.1."); self.assertEqual(resumed["next_action"],"Run the unit tests.")
+        self.assertEqual(resumed["capabilities"],self.draft["capabilities"]); self.assertEqual(resumed["decisions"],self.draft["decisions"]); self.assertEqual(resumed["acceptance_criteria"],self.draft["acceptance_criteria"]); self.assertEqual(resumed["verification"],self.draft["verification"]); self.assertEqual(resumed["open_questions"],self.draft["open_questions"]); self.assertEqual(resumed["remainder"],self.draft["remainder"])
+        (self.root/"HANDOFF.md").write_text(text, encoding="utf-8")
         self.assertEqual(evidence["fingerprint"], cp.inspect(self.root)["fingerprint"])
         (self.root/"tracked.txt").write_text("drift")
         result=cp.resume(self.root); self.assertFalse(result["fresh"]); self.assertIn("tracked.txt", result["changed_paths"])
 
     def test_new_commit_drift(self):
-        cp.publish(self.root,self.draft); (self.root/"x").write_text("x"); git(self.root,"add","x"); git(self.root,"commit","-qm","drift")
-        result=cp.resume(self.root); self.assertFalse(result["fresh"]); self.assertFalse(result["complete_path_comparison"]); self.assertNotEqual(result["saved_commit"],result["current_commit"]); self.assertEqual(result["saved_branch"],result["current_branch"])
+        cp.publish(self.root,self.draft); git(self.root,"commit","--allow-empty","-qm","empty")
+        empty=cp.resume(self.root); self.assertEqual(empty["resume_status"],"advanced"); self.assertEqual(empty["changed_paths"],[])
+        (self.root/"x").write_text("x"); git(self.root,"add","x"); git(self.root,"commit","-qm","drift")
+        result=cp.resume(self.root); self.assertFalse(result["fresh"]); self.assertEqual(result["resume_status"],"advanced"); self.assertEqual(result["branch_relation"],"advanced"); self.assertEqual((result["ahead"],result["behind"]),(2,0)); self.assertTrue(result["complete_path_comparison"]); self.assertIn("x",result["changed_paths"]); self.assertNotEqual(result["saved_commit"],result["current_commit"]); self.assertEqual(result["saved_branch"],result["current_branch"])
 
-    def test_branch_drift_is_not_complete_comparison(self):
+    def test_new_branch_inherits_checkpoint(self):
         cp.publish(self.root,self.draft); git(self.root,"checkout","-qb","other")
-        result=cp.resume(self.root); self.assertEqual(result["saved_commit"],result["current_commit"]); self.assertNotEqual(result["saved_branch"],result["current_branch"]); self.assertFalse(result["complete_path_comparison"])
+        result=cp.resume(self.root); self.assertEqual(result["resume_status"],"inherited"); self.assertEqual(result["branch_relation"],"branch-created"); self.assertEqual((result["ahead"],result["behind"]),(0,0)); self.assertEqual(result["changed_paths"],[]); self.assertTrue(result["complete_path_comparison"])
+        (self.root/"tracked.txt").write_text("changed")
+        drifted=cp.resume(self.root); self.assertEqual(drifted["resume_status"],"drifted"); self.assertEqual(drifted["branch_relation"],"branch-created"); self.assertIn("tracked.txt",drifted["changed_paths"])
+
+    def test_rewound_and_diverged_branches_are_classified(self):
+        initial=git(self.root,"rev-parse","HEAD").stdout.strip().decode(); (self.root/"side.txt").write_text("side"); git(self.root,"add","side.txt"); git(self.root,"commit","-qm","side")
+        cp.publish(self.root,self.draft); git(self.root,"checkout","-q",initial)
+        rewound=cp.resume(self.root); self.assertEqual(rewound["branch_relation"],"rewound"); self.assertEqual((rewound["ahead"],rewound["behind"]),(0,1)); self.assertIn("side.txt",rewound["changed_paths"])
+        git(self.root,"checkout","-qb","other"); (self.root/"other.txt").write_text("other"); git(self.root,"add","other.txt"); git(self.root,"commit","-qm","other")
+        diverged=cp.resume(self.root); self.assertEqual(diverged["branch_relation"],"diverged"); self.assertEqual((diverged["ahead"],diverged["behind"]),(1,1)); self.assertEqual(set(diverged["changed_paths"]),{"other.txt","side.txt"})
 
     def test_manual_prose_and_metadata_edits_rejected(self):
-        cp.publish(self.root,self.draft); p=self.root/"HANDOFF.md"; text=p.read_text()
+        cp.publish(self.root,self.draft); p=self.root/"HANDOFF.md"; text=p.read_text(encoding="utf-8")
         with self.assertRaisesRegex(cp.CheckpointError,"prose was edited"): cp.parse_handoff(text.replace("Ship v0.1.","Ship v0.2."))
         line=next(x for x in text.splitlines() if x.startswith(cp.META_PREFIX)); token=line[len(cp.META_PREFIX):-4]
         with self.assertRaises(Exception): cp.parse_handoff(text.replace(token, ("A" if token[0] != "A" else "B") + token[1:], 1))
@@ -182,7 +202,7 @@ class CheckpointTests(unittest.TestCase):
 
     def test_references_plan_symlink_and_escape(self):
         (self.root/"PLAN.md").write_text("locked"); (self.root/"doc.md").write_text("doc")
-        draft={**self.draft,"references":["doc.md"]}; cp.publish(self.root,draft); self.assertEqual(cp.parse_handoff((self.root/"HANDOFF.md").read_text())["plan"],"PLAN.md")
+        draft={**self.draft,"references":["doc.md"]}; cp.publish(self.root,draft); self.assertEqual(cp.parse_handoff((self.root/"HANDOFF.md").read_text(encoding="utf-8"))["plan"],"PLAN.md")
         (self.root/"link.md").symlink_to("doc.md")
         for ref in ("link.md","../outside"):
             with self.assertRaises(cp.CheckpointError): cp.validate_refs(self.root,[ref])
@@ -192,7 +212,7 @@ class CheckpointTests(unittest.TestCase):
         with self.assertRaisesRegex(cp.CheckpointError,"symlinks"): cp.render(self.root,self.draft,cp.inspect(self.root))
 
     def test_required_sections_placeholders_secret_and_size_limits(self):
-        cp.publish(self.root,self.draft); text=(self.root/"HANDOFF.md").read_text()
+        cp.publish(self.root,self.draft); text=(self.root/"HANDOFF.md").read_text(encoding="utf-8")
         with self.assertRaisesRegex(cp.CheckpointError,"section"): cp.validate_handoff(text.replace("## Identity","## Missing"))
         with self.assertRaisesRegex(cp.CheckpointError,"placeholder"): cp.render(self.root,{**self.draft,"goal":"TODO"},cp.inspect(self.root))
         with self.assertRaisesRegex(cp.CheckpointError,"secret"): cp.render(self.root,{**self.draft,"goal":"api_key=supersecretvalue"},cp.inspect(self.root))
@@ -208,9 +228,9 @@ class CheckpointTests(unittest.TestCase):
         text=cp.render(self.root,draft,cp.inspect(self.root)); self.assertIn("[env redacted]",text); self.assertIn("--token [redacted]",text); self.assertIn("--password [redacted]",text); self.assertNotIn("hidden",text)
 
     def test_draft_and_metadata_types_fail_cleanly(self):
-        for draft in ([], {**self.draft,"decisions":"no"}, {**self.draft,"extra":1}):
+        for draft in ([], {**self.draft,"decisions":"no"}, {**self.draft,"capabilities":[1]}, {**self.draft,"extra":1}):
             with self.assertRaises(cp.CheckpointError): cp.render(self.root,draft,cp.inspect(self.root))
-        cp.publish(self.root,self.draft); meta=cp.parse_handoff((self.root/"HANDOFF.md").read_text())
+        cp.publish(self.root,self.draft); meta=cp.parse_handoff((self.root/"HANDOFF.md").read_text(encoding="utf-8"))
         for change in ({"commit":3},{"manifest":{}},{"path_total":"1"},{"path_total":1},{"plan":"OTHER.md"},{"extra":1}):
             bad={**meta,**change}
             with self.assertRaises(cp.CheckpointError): cp.validate_metadata(bad)
@@ -231,7 +251,7 @@ class CheckpointTests(unittest.TestCase):
         self.assertIn("\nname: project-checkpoint\n",front); self.assertIn("\ndescription:",front)
         agent=(skill.parent/"agents/openai.yaml").read_text()
         self.assertIn('display_name: "Project Checkpoint"',agent); self.assertIn('short_description: "Save and resume integrity-checked project state"',agent); self.assertIn('$project-checkpoint',agent)
-        self.assertNotIn("python3 scripts/checkpoint.py",text); self.assertIn('<python> "<checkpoint.py>"',text); self.assertIn("Python 3.10+",text); self.assertIn("Reconcile every claim",text); self.assertIn("user-reported or unknown",text); self.assertIn("OS temporary directory outside",text)
+        self.assertNotIn("python3 scripts/checkpoint.py",text); self.assertIn('<python> "<checkpoint.py>"',text); self.assertIn("Python 3.10+",text); self.assertIn("Reconcile every claim",text); self.assertIn("repository-verified",text); self.assertIn("potentially stale",text); self.assertIn("OS temporary directory outside",text)
 
     def test_absolute_script_cli_inspect_publish_resume(self):
         draft=Path(self.temp.name)/"draft.json"; draft.write_text(json.dumps(self.draft))

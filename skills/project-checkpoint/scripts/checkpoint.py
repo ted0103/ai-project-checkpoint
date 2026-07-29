@@ -184,11 +184,11 @@ def sanitize_verification(value):
 
 def validate_draft(draft):
     if not isinstance(draft, dict): raise CheckpointError("Draft must be a JSON object.")
-    allowed = {"goal", "current_state", "decisions", "verification", "risks", "next_action", "remainder", "references"}
+    allowed = {"goal", "current_state", "capabilities", "decisions", "acceptance_criteria", "verification", "risks", "open_questions", "next_action", "remainder", "references"}
     if set(draft) - allowed: raise CheckpointError("Draft contains unsupported fields.")
     for key in ("goal", "current_state", "next_action"):
         if not isinstance(draft.get(key), str) or not draft[key].strip(): raise CheckpointError(f"Draft field {key} must be a non-empty string.")
-    for key in ("decisions", "verification", "risks", "remainder", "references"):
+    for key in ("capabilities", "decisions", "acceptance_criteria", "verification", "risks", "open_questions", "remainder", "references"):
         if key in draft and (not isinstance(draft[key], list) or not all(isinstance(v, str) for v in draft[key])): raise CheckpointError(f"Draft field {key} must be a list of strings.")
     return draft
 
@@ -218,15 +218,15 @@ def render(root, draft, evidence):
     lines = ["# Project Checkpoint", MARKER, "META", "", "## Identity", f"- Git mode: `{evidence['mode']}`", f"- Branch: `{safe_text(evidence['branch'])}`", f"- Commit: `{evidence['commit']}`", f"- Fingerprint: `{evidence['fingerprint']}`", "", "## Goal and specification", goal]
     if plan: lines.append("- Specification: `PLAN.md`")
     if refs: lines.append("- Referenced files: " + ", ".join(f"`{safe_text(r)}`" for r in refs))
-    lines += ["", "## Current state", state, "", "## Decisions that constrain the next task", items("decisions"), "", "## Working tree"]
+    lines += ["", "## Current state", state, "", "## Capability state", items("capabilities"), "", "## Decisions that constrain the next task", items("decisions"), "", "## Acceptance criteria", items("acceptance_criteria"), "", "## Working tree"]
     if evidence["manifest"]:
         lines += [f"- `{i['status']}` " + (f"`{safe_text(i['old_path'])}` -> " if i.get("old_path") else "") + f"`{safe_text(i['path'])}`" for i in evidence["manifest"]]
     else: lines.append("- Clean.")
     if evidence["path_omitted"]: lines.append(f"- {evidence['path_omitted']} additional paths omitted from display; aggregate fingerprint covers all {evidence['path_total']} paths.")
-    lines += ["", "## Verification evidence", items("verification", "No verification was recorded for the current work."), "", "## Risks and blockers", items("risks"), "", "## Exact next action", action]
+    lines += ["", "## Verification evidence", items("verification", "No verification was recorded for the current work."), "", "## Risks and blockers", items("risks"), "", "## Open questions", items("open_questions"), "", "## Exact next action", action]
     remainder = draft.get("remainder", [])
     if remainder: lines += ["", "Later remainder:"] + [f"{n}. {safe_text(v)}" for n, v in enumerate(remainder, 1)]
-    lines += ["", "## Resume prompt", "Use $project-checkpoint to resume this project. Validate HANDOFF.md and the current Git fingerprint first; read PLAN.md when referenced, then only explicitly referenced files or files required by my request. If fresh, report the recovered goal, current condition, and exact next action. If drifted, report only evidence-supported differences and do not overwrite the checkpoint.", ""]
+    lines += ["", "## Resume prompt", "Use $project-checkpoint to resume this project. Validate HANDOFF.md and classify the current branch relation first; recover the structured capability, decision, acceptance, verification, risk, and open-question context. Read PLAN.md when referenced, then only explicitly referenced files or files required by my request. Report evidence-supported drift and never overwrite the checkpoint during resume.", ""]
     provisional = "\n".join(line for line in lines if line != "META")
     meta = {"schema": SCHEMA, "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), **{k:evidence[k] for k in ("mode","branch","commit","fingerprint","manifest","path_total","path_omitted")}, "plan": plan, "references": refs, "prose_sha256": hashlib.sha256(prose_without_meta(provisional).encode()).hexdigest()}
     encoded = canonical(meta)
@@ -259,12 +259,29 @@ def parse_handoff(text):
     if hashlib.sha256(prose_without_meta(text).encode()).hexdigest() != meta.get("prose_sha256"): raise CheckpointError("HANDOFF.md prose was edited after generation.")
     return meta
 
-def section_first_line(text, section):
-    lines = text.splitlines(); start = lines.index(f"## {section}") + 1
+def section_lines(text, section):
+    lines = text.splitlines(); start = lines.index(f"## {section}") + 1; out = []
     for line in lines[start:]:
         if line.startswith("## "): break
+        out.append(line)
+    return out
+
+def section_first_line(text, section):
+    for line in section_lines(text, section):
         if line.strip(): return line.strip()
     raise CheckpointError(f"Handoff section is empty: {section}")
+
+def section_items(text, section):
+    if f"## {section}" not in text.splitlines(): return []
+    return [line[2:].strip() for line in section_lines(text, section) if line.startswith("- ")]
+
+def section_remainder(text):
+    out, active = [], False
+    for line in section_lines(text, "Exact next action"):
+        if line == "Later remainder:": active = True; continue
+        match = re.fullmatch(r"\d+\. (.+)", line) if active else None
+        if match: out.append(match.group(1))
+    return out
 
 def validate_metadata(meta):
     keys = {"schema","generated_at","mode","branch","commit","fingerprint","manifest","path_total","path_omitted","plan","references","prose_sha256"}
@@ -355,6 +372,21 @@ def publish(root, draft, approved=False):
         except FileNotFoundError: pass
     return evidence
 
+def commit_delta(root, saved_commit, current_commit, saved_branch, current_branch):
+    if saved_commit == current_commit:
+        return {"relation": "exact" if saved_branch == current_branch else "branch-created", "ahead": 0, "behind": 0, "paths": [], "known": True}
+    if "unborn" in {saved_commit, current_commit}:
+        return {"relation": "unknown", "ahead": None, "behind": None, "paths": [], "known": False}
+    for commit in (saved_commit, current_commit):
+        if run_git(root, "cat-file", "-e", f"{commit}^{{commit}}", check=False).returncode:
+            return {"relation": "unknown", "ahead": None, "behind": None, "paths": [], "known": False}
+    counts = run_git(root, "rev-list", "--left-right", "--count", f"{saved_commit}...{current_commit}", text=True).stdout.split()
+    behind, ahead = map(int, counts)
+    relation = "advanced" if not behind else "rewound" if not ahead else "diverged"
+    raw = split_z(run_git(root, "diff", "--name-only", "-z", saved_commit, current_commit, "--").stdout)
+    paths = [display_path(path) for path in raw if path and path != b"HANDOFF.md" and not path.startswith(b".HANDOFF.")]
+    return {"relation": relation, "ahead": ahead, "behind": behind, "paths": paths, "known": True}
+
 def resume(root):
     root = git_root(root); target = root / "HANDOFF.md"
     try: data, _ = read_regular(target)
@@ -365,9 +397,23 @@ def resume(root):
     fresh = current["commit"] == meta["commit"] and current["fingerprint"] == meta["fingerprint"]
     saved = {i["path_b64"]: i for i in meta["manifest"]}; now = {i["path_b64"]: i for i in current["manifest"]}
     changed = sorted({*(saved.keys()), *(now.keys())}, key=str)
-    paths = [now.get(k, saved.get(k))["path"] for k in changed if saved.get(k) != now.get(k)] if not meta["path_omitted"] and not current["path_omitted"] else []
-    complete = not meta["path_omitted"] and not current["path_omitted"] and meta["commit"] == current["commit"] and meta["branch"] == current["branch"]
-    return {"fresh": fresh, "goal": section_first_line(text, "Goal and specification"), "current_state": section_first_line(text, "Current state"), "next_action": section_first_line(text, "Exact next action"), "plan": meta["plan"], "references": meta["references"], "saved_commit": meta["commit"], "current_commit": current["commit"], "saved_branch": meta["branch"], "current_branch": current["branch"], "changed_paths": paths, "complete_path_comparison": complete}
+    dirty_paths = [now.get(k, saved.get(k))["path"] for k in changed if saved.get(k) != now.get(k)] if not meta["path_omitted"] and not current["path_omitted"] else []
+    delta = commit_delta(root, meta["commit"], current["commit"], meta["branch"], current["branch"])
+    all_paths = sorted(set(delta["paths"] + dirty_paths)); paths = all_paths[:MAX_MANIFEST]
+    complete = delta["known"] and not meta["path_omitted"] and not current["path_omitted"] and len(all_paths) <= MAX_MANIFEST
+    inherited = delta["relation"] == "branch-created" and complete and not paths
+    status = "fresh" if fresh else "inherited" if inherited else "drifted" if delta["relation"] in {"exact", "branch-created"} else delta["relation"]
+    return {
+        "schema": meta["schema"], "generated_at": meta["generated_at"], "resume_status": status, "fresh": fresh,
+        "goal": section_first_line(text, "Goal and specification"), "current_state": section_first_line(text, "Current state"),
+        "capabilities": section_items(text, "Capability state"), "decisions": section_items(text, "Decisions that constrain the next task"),
+        "acceptance_criteria": section_items(text, "Acceptance criteria"), "verification": section_items(text, "Verification evidence"),
+        "risks": section_items(text, "Risks and blockers"), "open_questions": section_items(text, "Open questions"),
+        "next_action": section_first_line(text, "Exact next action"), "remainder": section_remainder(text),
+        "plan": meta["plan"], "references": meta["references"], "saved_commit": meta["commit"], "current_commit": current["commit"],
+        "saved_branch": meta["branch"], "current_branch": current["branch"], "branch_relation": delta["relation"],
+        "ahead": delta["ahead"], "behind": delta["behind"], "changed_paths": paths, "complete_path_comparison": complete,
+    }
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__); sub = p.add_subparsers(dest="command", required=True)
@@ -384,7 +430,7 @@ def main(argv=None):
             with open(args.input, encoding="utf-8") as f: draft = json.load(f)
             evidence = publish(args.project, draft, args.approve_overwrite)
             result = {"published": True, **{k:evidence[k] for k in ("branch", "commit", "fingerprint", "path_total")}}
-        print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+        print(json.dumps(result, sort_keys=True))
     except (CheckpointError, OSError, ValueError, json.JSONDecodeError) as e:
         print(f"project-checkpoint: {e}", file=sys.stderr); return 2
     return 0

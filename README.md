@@ -1,67 +1,125 @@
-# github/ai-project-checkpoint
+<div align="center">
 
-**Say `checkpoint`. Resume from one compact, integrity-checked Markdown file.**
+# Project Checkpoint
 
-[v0.1.0](https://github.com/ted0103/ai-project-checkpoint/releases/tag/v0.1.0) · Python 3.10+ · Windows, macOS, and Linux · MIT
+**Portable, branch-aware continuity for AI coding tasks.**
 
-Project Checkpoint is a portable Agent Skill for Git projects. It turns the useful state of an AI coding task into one bounded `HANDOFF.md`, then checks that handoff against the repository before another task resumes.
+[![CI](https://github.com/ted0103/ai-project-checkpoint/actions/workflows/ci.yml/badge.svg)](https://github.com/ted0103/ai-project-checkpoint/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/ted0103/ai-project-checkpoint?style=flat-square)](https://github.com/ted0103/ai-project-checkpoint/releases)
+![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)
+[![MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
 
-No daemon. No cloud account. No transcript dump. The runtime is Python’s standard library plus Git.
+[Install](#install) · [Use](#use) · [How it works](#how-it-works) · [Resume states](#resume-states) · [Safety](#safety-and-limits)
+
+</div>
+
+Project Checkpoint is a portable [Agent Skill](skills/project-checkpoint/SKILL.md) for Git projects. It captures the state needed to continue an AI coding task in one compact `HANDOFF.md`, then validates that file against the repository before another task resumes.
+
+No daemon, cloud account, transcript archive, or runtime dependency beyond Python's standard library and Git.
+
+## Why use it?
+
+AI tasks lose more than file changes when context ends. They also lose the goal, accepted decisions, delivered behavior, verification evidence, unresolved questions, and the precise next action.
+
+Project Checkpoint preserves that operational context without copying the conversation:
+
+- capability state: `built`, `in-progress`, or `blocked`, with evidence;
+- active and superseded decisions, with reasons;
+- acceptance criteria and observed verification;
+- risks, open questions, and a small later remainder;
+- one exact next action;
+- branch, commit, working-tree manifest, and content-sensitive fingerprint.
 
 ## Install
+
+Install the skill with the Agent Skills CLI:
 
 ```bash
 npx skills add ted0103/ai-project-checkpoint --skill project-checkpoint
 ```
 
-Or copy [`skills/project-checkpoint`](skills/project-checkpoint) into any Agent Skills-compatible skills directory. The CLI installer requires Node.js/npm; the installed skill requires only Git and Python 3.10+.
+Or copy [`skills/project-checkpoint`](skills/project-checkpoint) into a skills directory supported by your agent.
 
-## Use it
+> [!NOTE]
+> The installer command requires Node.js/npm. The installed skill itself requires only Git and Python 3.10+ and runs on Windows, macOS, and Linux.
 
-Inside a Git project:
+## Use
+
+Inside the Git project you want to preserve, tell your agent:
 
 ```text
 checkpoint
 ```
 
-The skill resolves one explicit worktree, inspects its Git state, reconciles the task narrative with observed evidence, and atomically replaces its own `HANDOFF.md`.
+The skill inspects the selected worktree, reconciles the task narrative with repository evidence, and atomically writes `HANDOFF.md`.
 
-In a fresh task:
+In a new task, open the same project and say:
 
 ```text
 resume project
 ```
 
-The skill validates the handoff and current repository state before returning only the recovered goal, current condition, and exact next action. If the repository changed, it reports evidence-supported drift instead of pretending the checkpoint is fresh.
+The skill validates the checkpoint, explains how the current branch relates to the saved state, and returns the recovered context and exact next action. You can also invoke `$project-checkpoint` explicitly.
 
-You can also invoke `$project-checkpoint` explicitly.
+## How it works
 
-## What it protects
+### Checkpoint
+
+1. Resolve one explicit Git worktree.
+2. Record branch, commit, index state, and bounded hashes of changed or untracked files.
+3. Reconcile agent-written context with repository and task evidence.
+4. Sanitize, validate, and atomically replace the skill-owned `HANDOFF.md`.
+5. Embed canonical metadata and a digest that detects later prose edits.
+
+### Resume
+
+1. Validate the handoff structure, metadata, prose digest, and referenced files.
+2. Compare the saved commit and working state with the current repository.
+3. Classify the branch relationship and report bounded changed paths.
+4. Return structured capabilities, decisions, acceptance criteria, verification, risks, questions, remainder, and next action.
+
+## Resume states
+
+| Status | Meaning |
+| --- | --- |
+| `fresh` | Exact saved branch, commit, and working state |
+| `inherited` | Same commit and working state on another branch |
+| `advanced` | Current commit descends from the checkpoint |
+| `drifted` | Working state changed at the saved commit |
+| `rewound` | Current commit is behind the checkpoint |
+| `diverged` | Saved and current commits have different descendants |
+| `unknown` | Git cannot inspect a required commit, or the repository is unborn |
+
+Known commit relationships include ahead/behind counts and a bounded changed-path list. Verification recorded at checkpoint time is never presented as proof for later commits.
+
+## Safety and limits
 
 | Risk | Guardrail |
 | --- | --- |
-| Resuming the wrong project | Requires one explicit Git worktree; discovery is bounded and never trusts an ancestor repository alone |
-| Stale repository context | Records the branch, commit, bounded manifest, and a content-sensitive Git fingerprint |
-| A hand-edited checkpoint | Verifies the generated prose digest and hidden metadata before resume |
-| Unsafe file references | Accepts only repository-relative regular files; rejects symlinks and boundary escapes |
-| Overwriting someone else’s handoff | Refuses an unowned `HANDOFF.md` without approval for that exact path |
+| Wrong project | Requires one explicit worktree; discovery is depth- and result-bounded |
+| Hand-edited checkpoint | Verifies generated prose and canonical hidden metadata |
+| Unsafe references | Accepts repository-relative regular files; rejects symlinks and boundary escapes |
+| Accidental overwrite | Refuses an unowned `HANDOFF.md` without approval for that exact path |
 | Context bloat | Caps the handoff at 120 lines, 1,000 words, and 24 KiB |
+| Unbounded hashing | Caps individual files at 512 MiB, aggregate data at 2 GiB, and inspection at 30 seconds |
 
-Checkpointing records Git identity, current state, decisions, observed verification, risks, and one executable next action. Narrative claims remain agent-reconciled context—not machine-certified truth. Potential-secret detection is deliberately conservative and heuristic.
+> [!IMPORTANT]
+> Repository state and handoff integrity are machine-checked. Agent-written narrative remains reconciled context, not certified truth. External facts may become stale, and secret detection is deliberately conservative.
 
-## Why one file
+> [!NOTE]
+> Checkpointing does not run tests, stage files, commit, push, message agents, sync to a service, or support non-Git projects.
 
-Tools such as [OpenMOSS/claude-codex-handoff](https://github.com/OpenMOSS/claude-codex-handoff) coordinate asynchronous agents. Project Checkpoint addresses a smaller problem: reliable continuity between coding tasks without operating another service.
+## Project scope
 
-The file is portable, reviewable, replaceable, and easy to commit or transfer with the project. Project Checkpoint does not run tests, stage changes, commit, push, message other agents, sync to a cloud, or support non-Git projects.
+Project Checkpoint handles deliberate continuity between coding tasks. Tools such as [OpenMOSS/claude-codex-handoff](https://github.com/OpenMOSS/claude-codex-handoff) handle live asynchronous coordination, messaging, and process control. They solve different layers and can be used together.
 
-## Reliability
+The single-file design keeps a checkpoint portable, reviewable, replaceable, and easy to commit or transfer with the project.
 
-The test suite covers fresh and drifted resumes, prose and metadata tampering, unsafe references, overwrite races, size ceilings, secret-shaped text, bounded hashing, submodules, non-UTF-8 paths, and Windows path behavior. CI runs on Windows, macOS, and Ubuntu with Python 3.10 and 3.13.
+## Development
+
+The test suite covers structured context round-trips, branch inheritance, advanced/rewound/diverged histories, dirty state, tampering, unsafe references, overwrite races, size ceilings, bounded hashing, submodules, non-UTF-8 paths, and Windows path behavior. CI runs Python 3.10 and 3.13 on Windows, macOS, and Ubuntu.
 
 ```bash
 python -m unittest discover -s tests -v
 python /path/to/skill-creator/scripts/quick_validate.py skills/project-checkpoint
 ```
-
-Licensed under [MIT](LICENSE).
