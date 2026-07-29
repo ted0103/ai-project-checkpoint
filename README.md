@@ -71,6 +71,8 @@ checkpoint else
 
 This creates a verified minimum-runnable ZIP, extracts it into a temporary directory, and runs the smallest safe documented check from that copy. Upload the ZIP—not `HANDOFF.md` alone—to the other AI.
 
+If a branch or discussion contains several plausible projects, questions, or workstreams, the skill pauses first. It shows a short evidence-backed choice list—name, goal, and relevant paths or plan—so you select exactly what the handoff should describe.
+
 In a new task, open the same project and say:
 
 ```text
@@ -85,11 +87,12 @@ The skill validates the checkpoint, explains how the current branch relates to t
 
 1. Resolve one explicit Git worktree.
 2. Record branch, commit, index state, working-tree mode, and bounded hashes of changed or untracked files.
-3. Reconcile agent-written context with repository and task evidence.
-4. Sanitize, validate, and atomically replace the skill-owned `HANDOFF.md`.
-5. Embed canonical metadata and a digest that detects later prose edits.
-6. For `checkpoint here`, stop with the local handoff.
-7. For `checkpoint else`, package and test the minimum-runnable working set.
+3. Ask the user to choose when several checkpoint scopes remain plausible.
+4. Reconcile only the selected workstream with repository and task evidence.
+5. Sanitize, validate, and atomically replace the skill-owned `HANDOFF.md`.
+6. Embed canonical metadata and a digest that detects later prose edits.
+7. For `checkpoint here`, stop with the local handoff.
+8. For `checkpoint else`, package and test the minimum-runnable working set.
 
 ### Portable bundle
 
@@ -127,6 +130,7 @@ Known commit relationships include ahead/behind counts and a bounded changed-pat
 | Risk | Guardrail |
 | --- | --- |
 | Wrong project | Requires one explicit worktree; discovery is depth- and result-bounded |
+| Ambiguous workstream | Shows two to four concise evidence-backed choices before writing the handoff |
 | Hand-edited checkpoint | Verifies generated prose and canonical hidden metadata |
 | Unsafe references | Accepts repository-relative regular files; rejects symlinks and boundary escapes |
 | Accidental overwrite | Refuses an unowned `HANDOFF.md` without approval for that exact path |
