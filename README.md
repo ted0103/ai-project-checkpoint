@@ -17,6 +17,8 @@ Project Checkpoint is a portable [Agent Skill](skills/project-checkpoint/SKILL.m
 
 No daemon, cloud account, transcript archive, or runtime dependency beyond Python's standard library and Git.
 
+Most handoff skills preserve what an agent said. Project Checkpoint also checks whether Git still agrees.
+
 ## Why use it?
 
 AI tasks lose more than file changes when context ends. They also lose the goal, accepted decisions, delivered behavior, verification evidence, unresolved questions, and the precise next action.
@@ -28,11 +30,19 @@ Project Checkpoint preserves that operational context without copying the conver
 - acceptance criteria and observed verification;
 - risks, open questions, and a small later remainder;
 - one exact next action;
-- branch, commit, working-tree manifest, and content-sensitive fingerprint.
+- branch, commit, working-tree manifest, and content-and-mode-sensitive fingerprint.
+
+| Capability | Plain handoff prompt | Project Checkpoint |
+| --- | --- | --- |
+| Preserve task context | Yes | Yes |
+| Detect branch and commit drift | No | Yes |
+| Detect dirty-file content or executable-mode drift | No | Yes |
+| Detect later prose edits | No | Yes |
+| Require a service or account | No | No |
 
 ## Install
 
-Install the skill with the Agent Skills CLI:
+Install the skill with the [Agent Skills CLI](https://github.com/vercel-labs/skills):
 
 ```bash
 npx skills add ted0103/ai-project-checkpoint --skill project-checkpoint
@@ -66,7 +76,7 @@ The skill validates the checkpoint, explains how the current branch relates to t
 ### Checkpoint
 
 1. Resolve one explicit Git worktree.
-2. Record branch, commit, index state, and bounded hashes of changed or untracked files.
+2. Record branch, commit, index state, working-tree mode, and bounded hashes of changed or untracked files.
 3. Reconcile agent-written context with repository and task evidence.
 4. Sanitize, validate, and atomically replace the skill-owned `HANDOFF.md`.
 5. Embed canonical metadata and a digest that detects later prose edits.
@@ -101,10 +111,10 @@ Known commit relationships include ahead/behind counts and a bounded changed-pat
 | Unsafe references | Accepts repository-relative regular files; rejects symlinks and boundary escapes |
 | Accidental overwrite | Refuses an unowned `HANDOFF.md` without approval for that exact path |
 | Context bloat | Caps the handoff at 120 lines, 1,000 words, and 24 KiB |
-| Unbounded hashing | Caps individual files at 512 MiB, aggregate data at 2 GiB, and inspection at 30 seconds |
+| Unbounded inspection | Caps individual files at 512 MiB and aggregate data at 2 GiB; rejects captured Git output over 16 MiB or inspection over 30 seconds |
 
 > [!IMPORTANT]
-> Repository state and handoff integrity are machine-checked. Agent-written narrative remains reconciled context, not certified truth. External facts may become stale, and secret detection is deliberately conservative.
+> Repository state and handoff integrity are machine-checked. Agent-written narrative remains reconciled context, not certified truth. External facts may become stale, and secret detection is deliberately conservative. The digest detects edits but is not an adversarial signature.
 
 > [!NOTE]
 > Checkpointing does not run tests, stage files, commit, push, message agents, sync to a service, or support non-Git projects.
@@ -117,7 +127,7 @@ The single-file design keeps a checkpoint portable, reviewable, replaceable, and
 
 ## Development
 
-The test suite covers structured context round-trips, branch inheritance, advanced/rewound/diverged histories, dirty state, tampering, unsafe references, overwrite races, size ceilings, bounded hashing, submodules, non-UTF-8 paths, and Windows path behavior. CI runs Python 3.10 and 3.13 on Windows, macOS, and Ubuntu.
+The test suite covers structured context round-trips, schema-1 compatibility, branch inheritance, advanced/rewound/diverged histories, content and executable-mode drift, tampering, unsafe references, overwrite races, size and time ceilings, submodules, non-UTF-8 paths, and Windows path behavior. CI runs Python 3.10 and 3.13 on Windows, macOS, and Ubuntu.
 
 ```bash
 python -m unittest discover -s tests -v

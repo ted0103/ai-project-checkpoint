@@ -1,6 +1,6 @@
 ---
 name: project-checkpoint
-description: Save or resume compact, integrity-checked, branch-aware Git-project state in HANDOFF.md. Use only when the user says "checkpoint", "resume project", "resume from checkpoint", or explicitly invokes $project-checkpoint to save or resume state.
+description: Save or resume compact, integrity-checked, branch-aware Git project state in HANDOFF.md. Use when the user explicitly asks to checkpoint, hand off, save progress or context for a later coding task, resume project work, continue from HANDOFF.md, resume from checkpoint, or invokes $project-checkpoint. Do not trigger for routine summaries.
 ---
 
 # Project Checkpoint
@@ -38,8 +38,8 @@ Report success only after publication validates. Secret lint is heuristic, never
 1. Resolve the project again.
 2. Run `<python> "<checkpoint.py>" resume --project <resolved-root>`. Reject invalid metadata, prose edits, unsafe references, or malformed evidence. Use its structured goal, current state, capabilities, decisions, acceptance criteria, verification, risks, open questions, remainder, and next action; do not decode or repeat the hidden metadata comment.
 3. Read referenced `PLAN.md` when present, then only files explicitly referenced by the handoff or required by the new request. Repository evidence and the latest user instruction win over conflicts.
-4. Interpret `resume_status`: `fresh` is the exact saved state; `inherited` is the same commit and worktree on a new branch; `advanced` is a descendant with bounded commit/path evidence; `drifted` is changed working state at the saved commit. For these statuses, give a compact orientation and explain any evidence-supported changes. Saved verification does not cover later commits unless re-observed.
+4. Interpret `resume_status`: `fresh` is the exact saved state; `inherited` is the same commit and worktree on a new branch; `advanced` is a descendant with bounded commit/path evidence; `drifted` is changed working state at the saved commit. For these statuses, give a compact orientation and explain any evidence-supported changes. Treat saved verification as current only when `verification_current` is true.
 5. For `rewound`, `diverged`, or `unknown`, report branch relation, ahead/behind counts when available, and only evidence-supported paths. Request targeted inspection before mutation. If path comparison is incomplete, say so without implying the returned list is exhaustive. Never overwrite the checkpoint during resume.
 6. With only `resume project`, report the recovered goal, capability/progress condition, binding decisions, open questions, branch relation, and exact next action without mutation. With an accompanying authorized action, continue.
 
-The handoff is limited to 120 lines, 1,000 words, 24 KiB encoded, and 12 KiB decoded metadata. Hashing fails rather than weakens evidence at 512 MiB per file, 2 GiB aggregate, or the cooperative 30-second ceiling. Submodule internals are opaque; checkpoint a submodule separately when internal freshness matters.
+The handoff is limited to 120 lines, 1,000 words, 24 KiB encoded, and 12 KiB decoded metadata. Inspection fails rather than weakens evidence at 512 MiB per file, 2 GiB aggregate, 16 MiB of captured Git output, or 30 seconds. Submodule internals are opaque; checkpoint a submodule separately when internal freshness matters.
