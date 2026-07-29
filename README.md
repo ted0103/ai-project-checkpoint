@@ -31,7 +31,7 @@ Project Checkpoint preserves that operational context without copying the conver
 - risks, open questions, and a small later remainder;
 - one exact next action;
 - branch, commit, working-tree manifest, and content-and-mode-sensitive fingerprint.
-- a portable source snapshot containing tracked and non-ignored untracked files.
+- a portable, size-aware working set with design/UI code by default and user-selected extras.
 
 | Capability | Plain handoff prompt | Project Checkpoint |
 | --- | --- | --- |
@@ -63,7 +63,7 @@ Inside the Git project you want to preserve, tell your agent:
 checkpoint
 ```
 
-The skill inspects the selected worktree, reconciles the task narrative with repository evidence, atomically writes `HANDOFF.md`, and creates a verified source ZIP outside the project. Upload the ZIP—not `HANDOFF.md` alone—when the next AI cannot access the repository.
+The skill inspects the selected worktree, reconciles the task narrative with repository evidence, and atomically writes `HANDOFF.md`. It then analyzes the portable working set, includes design/UI code automatically, and asks which optional categories to add before creating a verified ZIP outside the project. Upload the ZIP—not `HANDOFF.md` alone—when the next AI cannot access the repository.
 
 In a new task, open the same project and say:
 
@@ -82,17 +82,18 @@ The skill validates the checkpoint, explains how the current branch relates to t
 3. Reconcile agent-written context with repository and task evidence.
 4. Sanitize, validate, and atomically replace the skill-owned `HANDOFF.md`.
 5. Embed canonical metadata and a digest that detects later prose edits.
-6. Package tracked files, non-ignored untracked files, and handoff references into a verified ZIP.
+6. Analyze file categories and sizes, then ask which optional categories to include.
+7. Package design/UI code, selected extras, and handoff references into a verified ZIP.
 
 ### Portable bundle
 
-The ZIP contains the working source plus:
+The ZIP contains the selected working set plus:
 
 - `.project-checkpoint/START_HERE.md` with concise resume instructions;
 - `HANDOFF.md` with task and Git identity;
 - `.project-checkpoint/bundle.json` with canonical file hashes, sizes, modes, and archive identity.
 
-It omits `.git`, Git history, deleted paths, and unreferenced ignored files. Bundle creation refuses stale handoffs, unsafe paths, submodule directories, likely secret files or credentials, and accidental overwrites.
+Design/UI code is automatic. Assets, source, configuration, tests, documentation, data, vendored files, releases, and other files are opt-in categories reported with counts, sizes, and sample paths. The ZIP omits `.git`, Git history, deleted paths, ignored files except explicit references, and unselected categories. Bundle creation refuses stale handoffs, unsafe paths, submodule directories, likely secret files or credentials, and accidental overwrites.
 
 ### Resume
 
@@ -123,7 +124,7 @@ Known commit relationships include ahead/behind counts and a bounded changed-pat
 | Hand-edited checkpoint | Verifies generated prose and canonical hidden metadata |
 | Unsafe references | Accepts repository-relative regular files; rejects symlinks and boundary escapes |
 | Accidental overwrite | Refuses an unowned `HANDOFF.md` without approval for that exact path |
-| Incomplete AI transfer | Bare checkpoints create both the handoff and a verified source ZIP |
+| Oversized AI transfer | Analyzes file categories and asks before adding anything beyond design/UI code |
 | Secret export | Excludes ignored files and rejects likely secret filenames or credentials |
 | Context bloat | Caps the handoff at 120 lines, 1,000 words, and 24 KiB |
 | Unbounded work | Caps individual files at 512 MiB and aggregate data at 2 GiB; caps archive entries at 20,000; rejects captured Git output over 16 MiB or inspection over 30 seconds |

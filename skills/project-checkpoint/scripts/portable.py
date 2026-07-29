@@ -17,9 +17,28 @@ import zipfile
 
 import checkpoint
 
-SCHEMA = 1
+SCHEMA = 2
 MAX_ENTRIES = 20_000
 RESERVED = {".project-checkpoint/START_HERE.md", ".project-checkpoint/bundle.json"}
+CATEGORIES = ("design-ui", "assets", "source", "config", "tests", "docs", "data", "vendor", "release", "other")
+ARCHIVE_SUFFIXES = {".7z", ".apk", ".bz2", ".dmg", ".gz", ".ipa", ".rar", ".tar", ".tgz", ".xz", ".zip"}
+DESIGN_UI_SUFFIXES = {
+    ".astro", ".css", ".htm", ".html", ".jsx", ".less", ".sass", ".scss", ".styl",
+    ".svelte", ".svg", ".tsx", ".vue",
+}
+ASSET_SUFFIXES = {".avif", ".gif", ".ico", ".jpeg", ".jpg", ".otf", ".png", ".ttf", ".webp", ".woff", ".woff2"}
+SOURCE_SUFFIXES = {
+    ".c", ".cc", ".cpp", ".cs", ".go", ".h", ".hpp", ".java", ".js", ".kt", ".m",
+    ".mm", ".php", ".py", ".rb", ".rs", ".sh", ".swift", ".ts",
+}
+DATA_SUFFIXES = {".csv", ".json", ".jsonl", ".ndjson", ".sql", ".tsv", ".xml", ".yaml", ".yml"}
+DOC_SUFFIXES = {".adoc", ".md", ".mdx", ".rst", ".txt"}
+UI_DIRS = {"components", "design", "layouts", "pages", "styles", "ui", "views"}
+CONFIG_NAMES = {
+    "cargo.toml", "composer.json", "deno.json", "deno.jsonc", "gemfile", "go.mod",
+    "package-lock.json", "package.json", "pnpm-lock.yaml", "pyproject.toml",
+    "requirements.txt", "yarn.lock",
+}
 STORED_SUFFIXES = {
     ".7z", ".apk", ".avif", ".bz2", ".docx", ".gif", ".gz", ".heic", ".ico",
     ".jpeg", ".jpg", ".mp3", ".mp4", ".pdf", ".png", ".pptx", ".rar", ".webm",
@@ -68,7 +87,7 @@ def archive_prefix(root):
     return name or "project"
 
 
-def source_paths(root, meta):
+def visible_paths(root, meta):
     raw = checkpoint.run_git(
         root, "ls-files", "-z", "--cached", "--others", "--exclude-standard",
     ).stdout
@@ -81,6 +100,99 @@ def source_paths(root, meta):
     if len(paths) > MAX_ENTRIES:
         fail(f"Bundle exceeds {MAX_ENTRIES} files; reduce generated or untracked project content.")
     return sorted(paths), required
+
+
+def classify_path(rel):
+    path = PurePosixPath(rel)
+    parts = {part.lower() for part in path.parts[:-1]}
+    name = path.name.lower()
+    suffix = path.suffix.lower()
+    if "release" in parts or "releases" in parts or suffix in ARCHIVE_SUFFIXES:
+        return "release"
+    if "vendor" in parts or "third_party" in parts or "third-party" in parts:
+        return "vendor"
+    if (
+        "test" in parts
+        or "tests" in parts
+        or "spec" in parts
+        or "specs" in parts
+        or (suffix in SOURCE_SUFFIXES | {".cjs", ".mjs"} and re.search(r"(?:^test[._-]|[._-](?:test|spec)\.[^.]+$)", name))
+    ):
+        return "tests"
+    if suffix in ASSET_SUFFIXES or parts & {"assets", "fonts", "icons", "images"}:
+        return "assets"
+    if (
+        suffix in DESIGN_UI_SUFFIXES
+        or (parts & UI_DIRS and suffix in SOURCE_SUFFIXES | DATA_SUFFIXES | DOC_SUFFIXES)
+        or (path.parts and path.parts[0].lower() in {"app", "public"} and suffix in SOURCE_SUFFIXES | DATA_SUFFIXES | DOC_SUFFIXES)
+    ):
+        return "design-ui"
+    if "docs" in parts or name.startswith(("readme", "license", "contributing", "changelog")) or suffix in DOC_SUFFIXES:
+        return "docs"
+    if (
+        name in CONFIG_NAMES
+        or name.endswith((".config.js", ".config.mjs", ".config.cjs", ".config.ts", ".lock"))
+        or name.startswith((".", "dockerfile"))
+    ):
+        return "config"
+    if suffix in SOURCE_SUFFIXES:
+        return "source"
+    if suffix in DATA_SUFFIXES:
+        return "data"
+    return "other"
+
+
+def source_paths(root, meta, include_categories):
+    paths, required = visible_paths(root, meta)
+    selected = []
+    omitted = set()
+    include = set(CATEGORIES) if "all" in include_categories else set(include_categories) | {"design-ui"}
+    for raw in paths:
+        rel = safe_relative(raw)
+        category = classify_path(rel)
+        if rel in required or category in include:
+            selected.append(raw)
+        else:
+            omitted.add(category)
+    return selected, required, sorted(omitted)
+
+
+def path_size(root, raw):
+    native = os.path.join(os.fsencode(root), raw)
+    try:
+        info = os.lstat(native)
+    except FileNotFoundError:
+        return None
+    if stat.S_ISLNK(info.st_mode):
+        return len(os.fsencode(os.readlink(native)))
+    return info.st_size if stat.S_ISREG(info.st_mode) else 0
+
+
+def analyze(project):
+    root = checkpoint.git_root(project)
+    if checkpoint.resume(root)["resume_status"] != "fresh":
+        fail("HANDOFF.md is not fresh for the current branch and working tree; publish a new checkpoint first.")
+    handoff_data, _ = checkpoint.read_regular(root / "HANDOFF.md")
+    meta = checkpoint.parse_handoff(handoff_data.decode("utf-8"))
+    raw_paths, required = visible_paths(root, meta)
+    groups = {category: {"file_count": 0, "source_bytes": 0, "sample": []} for category in CATEGORIES}
+    required_summary = {"file_count": 0, "source_bytes": 0, "sample": []}
+    for raw in raw_paths:
+        rel = safe_relative(raw)
+        size = path_size(root, raw)
+        if size is None:
+            continue
+        summary = required_summary if rel in required else groups[classify_path(rel)]
+        summary["file_count"] += 1
+        summary["source_bytes"] += size
+        if len(summary["sample"]) < 8:
+            summary["sample"].append(rel)
+    return {
+        "project": root.name,
+        "auto_categories": ["design-ui"],
+        "required": required_summary,
+        "categories": groups,
+    }
 
 
 def reject_secret_path(path):
@@ -208,21 +320,32 @@ def output_unchanged(output, identity):
     ) == identity
 
 
-def start_here(project):
+def start_here(project, schema=SCHEMA):
+    if schema == 1:
+        return (
+            "# Portable Project Checkpoint\n\n"
+            "Open `HANDOFF.md` first, then inspect the included source files before changing anything.\n\n"
+            "This archive contains the Git-visible working-tree snapshot, including tracked files and "
+            "non-ignored untracked files, plus explicitly referenced regular files. `.git`, Git history, "
+            "deleted paths, and unreferenced ignored files are intentionally absent. The branch and commit "
+            "in `HANDOFF.md` identify the saved "
+            "state but cannot reconstruct history from this archive alone. Do not claim saved verification "
+            "is current after editing the source.\n\n"
+            f"Project directory: `{project}`\n"
+        ).encode()
     return (
         "# Portable Project Checkpoint\n\n"
         "Open `HANDOFF.md` first, then inspect the included source files before changing anything.\n\n"
-        "This archive contains the Git-visible working-tree snapshot, including tracked files and "
-        "non-ignored untracked files, plus explicitly referenced regular files. `.git`, Git history, "
-        "deleted paths, and unreferenced ignored files are intentionally absent. The branch and commit "
-        "in `HANDOFF.md` identify the saved "
-        "state but cannot reconstruct history from this archive alone. Do not claim saved verification "
-        "is current after editing the source.\n\n"
+        "This archive contains the selected design/UI working set, explicitly requested categories, "
+        "and required checkpoint references. Other Git-visible files may be intentionally absent. "
+        "`.git`, Git history, deleted paths, and Git-ignored files are absent. The branch and commit in "
+        "`HANDOFF.md` identify the saved state but cannot reconstruct history from this archive alone. "
+        "Do not claim saved verification is current after editing the source.\n\n"
         f"Project directory: `{project}`\n"
     ).encode()
 
 
-def create(project, output, approved=False):
+def create(project, output, approved=False, include_categories=None):
     root = checkpoint.git_root(project)
     output = Path(output).expanduser()
     if not output.is_absolute():
@@ -240,7 +363,8 @@ def create(project, output, approved=False):
         fail("HANDOFF.md is not fresh for the current branch and working tree; publish a new checkpoint first.")
     handoff_data, _ = checkpoint.read_regular(root / "HANDOFF.md")
     meta = checkpoint.parse_handoff(handoff_data.decode("utf-8"))
-    raw_paths, required = source_paths(root, meta)
+    include_categories = include_categories or []
+    raw_paths, required, omitted_categories = source_paths(root, meta, include_categories)
     prefix = archive_prefix(root)
     files = []
     total = 0
@@ -258,7 +382,7 @@ def create(project, output, approved=False):
                 files.append(item)
             if "HANDOFF.md" not in {item["path"] for item in files}:
                 fail("Portable bundle requires HANDOFF.md.")
-            guide = start_here(prefix)
+            guide = start_here(prefix, SCHEMA)
             zf.writestr(zip_info(f"{prefix}/.project-checkpoint/START_HERE.md", 0o644, time.time()), guide)
             manifest = {
                 "schema": SCHEMA,
@@ -269,7 +393,12 @@ def create(project, output, approved=False):
                 "fingerprint": meta["fingerprint"],
                 "handoff": "HANDOFF.md",
                 "files": files,
-                "omitted": [".git and Git history", "deleted paths", "unreferenced Git-ignored files"],
+                "omitted": [
+                    ".git and Git history",
+                    "deleted paths",
+                    "Git-ignored files",
+                    *([f"Git-visible categories not selected: {', '.join(omitted_categories)}"] if omitted_categories else []),
+                ],
             }
             zf.writestr(zip_info(f"{prefix}/.project-checkpoint/bundle.json", 0o644, time.time()), canonical(manifest))
         verify(temporary)
@@ -285,7 +414,11 @@ def create(project, output, approved=False):
         except FileNotFoundError:
             pass
     result = verify(output)
-    result.update({"created": True, "output": os.fspath(output)})
+    result.update({
+        "created": True,
+        "included_categories": sorted(set(CATEGORIES) if "all" in include_categories else set(include_categories) | {"design-ui"}),
+        "output": os.fspath(output),
+    })
     return result
 
 
@@ -327,7 +460,7 @@ def verify(bundle):
         if canonical(manifest) != manifest_raw:
             fail("Bundle manifest is not canonical.")
         required_keys = {"schema", "created_at", "project", "branch", "commit", "fingerprint", "handoff", "files", "omitted"}
-        if not isinstance(manifest, dict) or set(manifest) != required_keys or manifest["schema"] != SCHEMA:
+        if not isinstance(manifest, dict) or set(manifest) != required_keys or manifest["schema"] not in {1, SCHEMA}:
             fail("Bundle manifest schema is invalid.")
         if (
             not all(isinstance(manifest[key], str) for key in ("created_at", "project", "branch", "commit", "fingerprint", "handoff"))
@@ -352,7 +485,7 @@ def verify(bundle):
             f"{prefix}/.project-checkpoint/START_HERE.md",
             f"{prefix}/.project-checkpoint/bundle.json",
         }
-        if zf.read(f"{prefix}/.project-checkpoint/START_HERE.md") != start_here(prefix):
+        if zf.read(f"{prefix}/.project-checkpoint/START_HERE.md") != start_here(prefix, manifest["schema"]):
             fail("Bundle resume instructions failed integrity verification.")
         info_by_name = {info.filename: info for info in infos}
         total = 0
@@ -425,15 +558,23 @@ def verify(bundle):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
+    analyze_parser = commands.add_parser("analyze")
+    analyze_parser.add_argument("--project", required=True)
     create_parser = commands.add_parser("create")
     create_parser.add_argument("--project", required=True)
     create_parser.add_argument("--output", required=True)
     create_parser.add_argument("--approve-overwrite", action="store_true")
+    create_parser.add_argument("--include-category", action="append", choices=[*CATEGORIES, "all"], default=[])
     verify_parser = commands.add_parser("verify")
     verify_parser.add_argument("--bundle", required=True)
     args = parser.parse_args(argv)
     try:
-        result = create(args.project, args.output, args.approve_overwrite) if args.command == "create" else verify(args.bundle)
+        if args.command == "analyze":
+            result = analyze(args.project)
+        elif args.command == "create":
+            result = create(args.project, args.output, args.approve_overwrite, args.include_category)
+        else:
+            result = verify(args.bundle)
         print(json.dumps(result, sort_keys=True))
     except (checkpoint.CheckpointError, OSError, ValueError, zipfile.BadZipFile, json.JSONDecodeError) as e:
         print(f"project-checkpoint-portable: {e}", file=sys.stderr)

@@ -24,14 +24,22 @@ Discovery is bounded to depth 3 and 50 candidates and excludes generated/vendor/
 3. Reference only repository-relative regular files. Never modify `PLAN.md`; reference it when present. Reject referenced symlinks and boundary escapes.
 4. Create the publish JSON in the OS temporary directory outside the selected worktree. Include `goal`, `current_state`, `capabilities`, `decisions`, `acceptance_criteria`, `verification`, `risks`, `open_questions`, `next_action`, optional `remainder`, and optional `references`. List entries are concise strings; write capability entries as `status — capability — evidence`, and decision entries as `active|superseded — decision — reason`. Run publish with that absolute temporary path, then remove the draft in all success and failure cases. The helper sanitizes, validates, and atomically replaces `HANDOFF.md`.
 5. If an existing regular `HANDOFF.md` lacks the generator marker, obtain explicit approval for that exact path and pass `--approve-overwrite`. Never approve implicitly.
-6. A bare checkpoint creates both `HANDOFF.md` and a portable ZIP unless the user explicitly requests a local, metadata-only, or HANDOFF-only checkpoint. Create the ZIP outside the selected worktree with a collision-resistant name:
+6. After publishing `HANDOFF.md`, analyze the portable working set before creating a ZIP:
 
 ```text
-<python> "<portable.py>" create --project <resolved-root> --output <absolute-output.zip>
+<python> "<portable.py>" analyze --project <resolved-root>
+```
+
+Design/UI code is the only automatic category. Binary assets and vendored runtimes are separate opt-ins so large images, fonts, media, and third-party files do not silently inflate the bundle. Summarize the automatic file count and size, then list each non-empty optional category (`assets`, `source`, `config`, `tests`, `docs`, `data`, `vendor`, `release`, `other`) with count, size, and useful sample paths. Recommend only categories supported by the saved goal and next action. Ask one concise question naming the automatic design/UI set and asking which optional categories to add. Do not create the ZIP until the user answers. If the original request already names the exact categories or explicitly says design/UI only, do not ask again.
+
+7. Create the ZIP outside the selected worktree with a collision-resistant name. Repeat `--include-category` for each user-selected category; omit it for a design/UI-only bundle. Use `--include-category all` only when the user explicitly requests the complete Git-visible working set.
+
+```text
+<python> "<portable.py>" create --project <resolved-root> --output <absolute-output.zip> [--include-category <category>]...
 <python> "<portable.py>" verify --bundle <absolute-output.zip>
 ```
 
-The bundle contains the generated handoff, all tracked files present in the working tree, non-ignored untracked files, and referenced regular files even when ignored. It therefore carries source code, local working changes, manifests, and non-ignored release artifacts. It excludes `.git`, unreferenced ignored files, deleted paths, and Git history. Creation fails on unsafe paths, submodule directories, likely secret files or credentials, a stale handoff, or an existing output unless the user explicitly approves that exact output with `--approve-overwrite`. Secret lint is heuristic, never guaranteed detection.
+The bundle always contains the generated handoff, automatic design/UI files, and referenced regular files even when ignored. It adds only the optional categories the user selected. It excludes `.git`, ignored files except references, deleted paths, Git history, and unselected categories. Creation fails on unsafe paths, submodule directories, likely secret files or credentials, a stale handoff, or an existing output unless the user explicitly approves that exact output with `--approve-overwrite`. Secret lint is heuristic, never guaranteed detection.
 
 Example:
 
@@ -43,7 +51,7 @@ Report success only after publication and, when applicable, portable-bundle veri
 
 ## Resume
 
-When given a portable ZIP instead of a repository, run `<python> "<portable.py>" verify --bundle <bundle.zip>` before opening it. Read `<project>/.project-checkpoint/START_HERE.md`, then `<project>/HANDOFF.md`, then work from the included source tree. The bundle is a working-tree snapshot without Git history; do not invent branch ancestry or treat saved verification as current after changing files.
+When given a portable ZIP instead of a repository, run `<python> "<portable.py>" verify --bundle <bundle.zip>` before opening it. Read `<project>/.project-checkpoint/START_HERE.md`, then `<project>/HANDOFF.md`, then work from the included source tree. The bundle is a selected working set without Git history; do not assume omitted categories are available, invent branch ancestry, or treat saved verification as current after changing files.
 
 1. Resolve the project again.
 2. Run `<python> "<checkpoint.py>" resume --project <resolved-root>`. Reject invalid metadata, prose edits, unsafe references, or malformed evidence. Use its structured goal, current state, capabilities, decisions, acceptance criteria, verification, risks, open questions, remainder, and next action; do not decode or repeat the hidden metadata comment.
