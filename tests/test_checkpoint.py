@@ -321,30 +321,52 @@ class CheckpointTests(unittest.TestCase):
         with mock.patch.object(cp,"inspect",side_effect=drift):
             with self.assertRaisesRegex(cp.CheckpointError,"changed before publication"): cp.publish(self.root,self.draft)
 
-    def test_portable_bundle_includes_source_references_and_untracked_files(self):
+    def test_portable_bundle_analyzes_categories_and_includes_only_selected_files(self):
         (self.root/".gitignore").write_text("ignored.txt\nignored-reference.md\n"); git(self.root,"add",".gitignore"); git(self.root,"commit","-qm","ignore")
         (self.root/"untracked.txt").write_text("portable")
         (self.root/"ignored.txt").write_text("omit")
         (self.root/"ignored-reference.md").write_text("include")
+        fixtures={
+            "app/index.html":"<main>ready</main>",
+            "assets/hero.png":"image",
+            "src/core.py":"VALUE = 1",
+            "tests/test_core.py":"assert True",
+            "release/old.zip":"archive",
+        }
+        for relative,content in fixtures.items():
+            path=self.root/relative; path.parent.mkdir(parents=True,exist_ok=True); path.write_text(content)
         cp.publish(self.root,{**self.draft,"references":["ignored-reference.md"]})
+        analysis=portable.analyze(self.root)
+        self.assertEqual(analysis["auto_categories"],["design-ui"]); self.assertEqual(analysis["categories"]["design-ui"]["file_count"],1)
+        self.assertEqual(analysis["categories"]["assets"]["file_count"],1); self.assertEqual(analysis["categories"]["release"]["file_count"],1)
         bundle=Path(self.temp.name)/"project.zip"; result=portable.create(self.root,bundle)
-        self.assertTrue(result["verified"]); self.assertEqual(result["file_count"],5)
+        self.assertTrue(result["verified"]); self.assertEqual(result["file_count"],3); self.assertEqual(result["included_categories"],["design-ui"])
         verified=portable.verify(bundle); self.assertEqual(verified["sha256"],result["sha256"])
         with zipfile.ZipFile(bundle) as archive:
             names=set(archive.namelist())
-            self.assertIn("repo/HANDOFF.md",names); self.assertIn("repo/tracked.txt",names)
-            self.assertIn("repo/untracked.txt",names); self.assertIn("repo/ignored-reference.md",names)
-            self.assertNotIn("repo/ignored.txt",names)
+            self.assertIn("repo/HANDOFF.md",names); self.assertIn("repo/app/index.html",names); self.assertIn("repo/ignored-reference.md",names)
+            self.assertNotIn("repo/tracked.txt",names); self.assertNotIn("repo/untracked.txt",names); self.assertNotIn("repo/assets/hero.png",names)
+            self.assertNotIn("repo/src/core.py",names); self.assertNotIn("repo/tests/test_core.py",names); self.assertNotIn("repo/release/old.zip",names)
             self.assertIn("repo/.project-checkpoint/START_HERE.md",names)
+        selected=Path(self.temp.name)/"selected.zip"; selected_result=portable.create(self.root,selected,include_categories=["source","tests"])
+        self.assertEqual(selected_result["included_categories"],["design-ui","source","tests"])
+        with zipfile.ZipFile(selected) as archive:
+            names=set(archive.namelist()); self.assertIn("repo/src/core.py",names); self.assertIn("repo/tests/test_core.py",names); self.assertNotIn("repo/assets/hero.png",names)
         with self.assertRaisesRegex(cp.CheckpointError,"overwrite"): portable.create(self.root,bundle)
-        cli=subprocess.run([sys.executable,os.fspath(PORTABLE_SCRIPT),"verify","--bundle",os.fspath(bundle)],check=True,stdout=subprocess.PIPE,text=True)
-        self.assertTrue(json.loads(cli.stdout)["verified"])
+        cli=lambda *args: json.loads(subprocess.run([sys.executable,os.fspath(PORTABLE_SCRIPT),*args],check=True,stdout=subprocess.PIPE,text=True).stdout)
+        self.assertTrue(cli("verify","--bundle",os.fspath(bundle))["verified"]); self.assertEqual(cli("analyze","--project",os.fspath(self.root))["auto_categories"],["design-ui"])
+
+    def test_portable_schema_one_bundle_still_verifies(self):
+        cp.publish(self.root,self.draft); bundle=Path(self.temp.name)/"legacy.zip"
+        with mock.patch.object(portable,"SCHEMA",1):
+            portable.create(self.root,bundle,include_categories=["all"])
+        self.assertEqual(portable.verify(bundle)["file_count"],2)
 
     def test_portable_bundle_refuses_secret_filename_and_content(self):
         for name,content in (("credentials.json","{}"),("token.txt","ghp_abcdefghijklmnop")):
             path=self.root/name; path.write_text(content); cp.publish(self.root,self.draft)
             with self.assertRaisesRegex(cp.CheckpointError,"secret|credential"):
-                portable.create(self.root,Path(self.temp.name)/f"{name}.zip")
+                portable.create(self.root,Path(self.temp.name)/f"{name}.zip",include_categories=["all"])
             path.unlink()
 
     def test_portable_paths_are_cross_platform_safe(self):
@@ -354,16 +376,16 @@ class CheckpointTests(unittest.TestCase):
     @unittest.skipUnless(os.name == "posix", "POSIX symlinks")
     def test_portable_symlink_targets_and_bundle_paths_are_safe(self):
         (self.root/"link").symlink_to("tracked.txt"); cp.publish(self.root,self.draft)
-        bundle=Path(self.temp.name)/"project.zip"; portable.create(self.root,bundle); self.assertTrue(portable.verify(bundle)["verified"])
+        bundle=Path(self.temp.name)/"project.zip"; portable.create(self.root,bundle,include_categories=["all"]); self.assertTrue(portable.verify(bundle)["verified"])
         alias=Path(self.temp.name)/"alias.zip"; alias.symlink_to(bundle.name)
         with self.assertRaisesRegex(cp.CheckpointError,"regular ZIP"): portable.verify(alias)
         with self.assertRaisesRegex(cp.CheckpointError,"regular file"): portable.create(self.root,alias,approved=True)
         (self.root/"link").unlink(); (self.root/"link").symlink_to("../outside"); cp.publish(self.root,self.draft)
         with self.assertRaisesRegex(cp.CheckpointError,"Escaping symlink"):
-            portable.create(self.root,Path(self.temp.name)/"escape.zip")
+            portable.create(self.root,Path(self.temp.name)/"escape.zip",include_categories=["all"])
 
     def test_portable_verifier_rejects_instruction_and_mode_tampering(self):
-        cp.publish(self.root,self.draft); bundle=Path(self.temp.name)/"project.zip"; portable.create(self.root,bundle)
+        cp.publish(self.root,self.draft); bundle=Path(self.temp.name)/"project.zip"; portable.create(self.root,bundle,include_categories=["all"])
         def rewrite(output,mutate):
             with zipfile.ZipFile(bundle) as source, zipfile.ZipFile(output,"w") as target:
                 for original in source.infolist():
