@@ -1,0 +1,4 @@
+interface:
+  display_name: "Project Checkpoint"
+  short_description: "Save and resume integrity-checked project state"
+  default_prompt: "Use $project-checkpoint to checkpoint or resume this Git project."
