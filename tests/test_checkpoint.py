@@ -141,8 +141,9 @@ class CheckpointTests(unittest.TestCase):
         calls = 0
         def changing(fd):
             nonlocal calls; calls += 1; s = real_fstat(fd)
-            if calls > 1: os.utime(p, None)
-            return real_fstat(fd)
+            if calls > 1:
+                return type("S", (), {**{n:getattr(s,n) for n in ("st_mode","st_dev","st_ino","st_size","st_mtime_ns","st_ctime_ns")}, "st_mtime_ns": s.st_mtime_ns + 1})()
+            return s
         with mock.patch.object(cp.os, "fstat", side_effect=changing):
             with self.assertRaisesRegex(cp.CheckpointError, "changed while hashing"): cp.safe_hash(self.root, b"race", 0, cp.time.monotonic()+10)
 
