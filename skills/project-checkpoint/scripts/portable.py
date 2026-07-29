@@ -17,16 +17,30 @@ import zipfile
 
 import checkpoint
 
-SCHEMA = 2
+SCHEMA = 3
 MAX_ENTRIES = 20_000
 RESERVED = {".project-checkpoint/START_HERE.md", ".project-checkpoint/bundle.json"}
-CATEGORIES = ("design-ui", "assets", "source", "config", "tests", "docs", "data", "vendor", "release", "other")
+CATEGORIES = (
+    "design-ui", "runtime-assets", "source", "config", "tests", "docs", "data",
+    "runtime-vendor", "other", "assets", "vendor", "release",
+)
+PROFILES = {
+    "ui": {"design-ui"},
+    "runnable": {
+        "design-ui", "runtime-assets", "source", "config", "tests", "docs", "data",
+        "runtime-vendor", "other",
+    },
+    "all": set(CATEGORIES),
+}
 ARCHIVE_SUFFIXES = {".7z", ".apk", ".bz2", ".dmg", ".gz", ".ipa", ".rar", ".tar", ".tgz", ".xz", ".zip"}
 DESIGN_UI_SUFFIXES = {
     ".astro", ".css", ".htm", ".html", ".jsx", ".less", ".sass", ".scss", ".styl",
     ".svelte", ".svg", ".tsx", ".vue",
 }
-ASSET_SUFFIXES = {".avif", ".gif", ".ico", ".jpeg", ".jpg", ".otf", ".png", ".ttf", ".webp", ".woff", ".woff2"}
+ASSET_SUFFIXES = {
+    ".avif", ".gif", ".heic", ".ico", ".jpeg", ".jpg", ".mp3", ".mp4", ".otf",
+    ".pdf", ".png", ".ttf", ".webm", ".webp", ".woff", ".woff2",
+}
 SOURCE_SUFFIXES = {
     ".c", ".cc", ".cpp", ".cs", ".go", ".h", ".hpp", ".java", ".js", ".kt", ".m",
     ".mm", ".php", ".py", ".rb", ".rs", ".sh", ".swift", ".ts",
@@ -34,6 +48,10 @@ SOURCE_SUFFIXES = {
 DATA_SUFFIXES = {".csv", ".json", ".jsonl", ".ndjson", ".sql", ".tsv", ".xml", ".yaml", ".yml"}
 DOC_SUFFIXES = {".adoc", ".md", ".mdx", ".rst", ".txt"}
 UI_DIRS = {"components", "design", "layouts", "pages", "styles", "ui", "views"}
+NON_RUNTIME_ASSET_DIRS = {
+    "archive", "archives", "design", "docs", "examples", "generated-source", "proof",
+    "proofs", "qa", "reference", "references", "release", "releases", "screenshots",
+}
 CONFIG_NAMES = {
     "cargo.toml", "composer.json", "deno.json", "deno.jsonc", "gemfile", "go.mod",
     "package-lock.json", "package.json", "pnpm-lock.yaml", "pyproject.toml",
@@ -105,12 +123,17 @@ def visible_paths(root, meta):
 def classify_path(rel):
     path = PurePosixPath(rel)
     parts = {part.lower() for part in path.parts[:-1]}
+    top = path.parts[0].lower()
     name = path.name.lower()
     suffix = path.suffix.lower()
+    non_runtime_asset = (
+        top in NON_RUNTIME_ASSET_DIRS
+        or bool(parts & {"archive", "archives", "generated-source", "proof", "proofs", "qa", "screenshots"})
+    )
     if "release" in parts or "releases" in parts or suffix in ARCHIVE_SUFFIXES:
         return "release"
     if "vendor" in parts or "third_party" in parts or "third-party" in parts:
-        return "vendor"
+        return "vendor" if non_runtime_asset else "runtime-vendor"
     if (
         "test" in parts
         or "tests" in parts
@@ -120,7 +143,7 @@ def classify_path(rel):
     ):
         return "tests"
     if suffix in ASSET_SUFFIXES or parts & {"assets", "fonts", "icons", "images"}:
-        return "assets"
+        return "assets" if non_runtime_asset else "runtime-assets"
     if (
         suffix in DESIGN_UI_SUFFIXES
         or (parts & UI_DIRS and suffix in SOURCE_SUFFIXES | DATA_SUFFIXES | DOC_SUFFIXES)
@@ -142,19 +165,31 @@ def classify_path(rel):
     return "other"
 
 
-def source_paths(root, meta, include_categories):
-    paths, required = visible_paths(root, meta)
+def selected_paths(paths, required, dirty, profile, include_categories):
+    if profile not in PROFILES:
+        fail(f"Unknown bundle profile: {profile}")
+    include = set(CATEGORIES) if "all" in include_categories else PROFILES[profile] | set(include_categories)
     selected = []
     omitted = set()
-    include = set(CATEGORIES) if "all" in include_categories else set(include_categories) | {"design-ui"}
+    actual = set()
     for raw in paths:
         rel = safe_relative(raw)
         category = classify_path(rel)
-        if rel in required or category in include:
+        active_progress = profile == "runnable" and rel in dirty and category != "release"
+        if rel in required or category in include or active_progress:
             selected.append(raw)
+            if rel not in required:
+                actual.add(category)
         else:
             omitted.add(category)
-    return selected, required, sorted(omitted)
+    return selected, sorted(omitted), sorted(actual)
+
+
+def source_paths(root, meta, profile, include_categories):
+    paths, required = visible_paths(root, meta)
+    dirty = {safe_relative(entry[0]) for entry in checkpoint.status_entries(root)}
+    selected, omitted, actual = selected_paths(paths, required, dirty, profile, include_categories)
+    return selected, required, omitted, actual
 
 
 def path_size(root, raw):
@@ -175,6 +210,7 @@ def analyze(project):
     handoff_data, _ = checkpoint.read_regular(root / "HANDOFF.md")
     meta = checkpoint.parse_handoff(handoff_data.decode("utf-8"))
     raw_paths, required = visible_paths(root, meta)
+    dirty = {safe_relative(entry[0]) for entry in checkpoint.status_entries(root)}
     groups = {category: {"file_count": 0, "source_bytes": 0, "sample": []} for category in CATEGORIES}
     required_summary = {"file_count": 0, "source_bytes": 0, "sample": []}
     for raw in raw_paths:
@@ -187,11 +223,21 @@ def analyze(project):
         summary["source_bytes"] += size
         if len(summary["sample"]) < 8:
             summary["sample"].append(rel)
+    profiles = {}
+    for profile in PROFILES:
+        selected, _, actual = selected_paths(raw_paths, required, dirty, profile, [])
+        sizes = [path_size(root, raw) for raw in selected]
+        profiles[profile] = {
+            "categories": actual,
+            "file_count": sum(size is not None for size in sizes),
+            "source_bytes": sum(size for size in sizes if size is not None),
+        }
     return {
         "project": root.name,
-        "auto_categories": ["design-ui"],
+        "default_profile": "runnable",
         "required": required_summary,
         "categories": groups,
+        "profiles": profiles,
     }
 
 
@@ -333,19 +379,31 @@ def start_here(project, schema=SCHEMA):
             "is current after editing the source.\n\n"
             f"Project directory: `{project}`\n"
         ).encode()
+    if schema == 2:
+        return (
+            "# Portable Project Checkpoint\n\n"
+            "Open `HANDOFF.md` first, then inspect the included source files before changing anything.\n\n"
+            "This archive contains the selected design/UI working set, explicitly requested categories, "
+            "and required checkpoint references. Other Git-visible files may be intentionally absent. "
+            "`.git`, Git history, deleted paths, and Git-ignored files are absent. The branch and commit in "
+            "`HANDOFF.md` identify the saved state but cannot reconstruct history from this archive alone. "
+            "Do not claim saved verification is current after editing the source.\n\n"
+            f"Project directory: `{project}`\n"
+        ).encode()
     return (
         "# Portable Project Checkpoint\n\n"
-        "Open `HANDOFF.md` first, then inspect the included source files before changing anything.\n\n"
-        "This archive contains the selected design/UI working set, explicitly requested categories, "
-        "and required checkpoint references. Other Git-visible files may be intentionally absent. "
-        "`.git`, Git history, deleted paths, and Git-ignored files are absent. The branch and commit in "
-        "`HANDOFF.md` identify the saved state but cannot reconstruct history from this archive alone. "
-        "Do not claim saved verification is current after editing the source.\n\n"
+        "Open `HANDOFF.md` first. Follow its exact next action and reuse only the setup, run, and "
+        "verification commands recorded there or documented in the included project files.\n\n"
+        "This archive contains the minimum runnable working set: active non-release progress, source, "
+        "configuration, tests, documentation, data, runtime assets, runtime vendor files, and checkpoint "
+        "references. Large design/reference assets and release artifacts may be intentionally absent; "
+        "check `.project-checkpoint/bundle.json` before assuming they exist. `.git`, Git history, deleted "
+        "paths, and Git-ignored files are absent. Do not claim saved verification is current after editing.\n\n"
         f"Project directory: `{project}`\n"
     ).encode()
 
 
-def create(project, output, approved=False, include_categories=None):
+def create(project, output, approved=False, include_categories=None, profile="runnable"):
     root = checkpoint.git_root(project)
     output = Path(output).expanduser()
     if not output.is_absolute():
@@ -364,7 +422,9 @@ def create(project, output, approved=False, include_categories=None):
     handoff_data, _ = checkpoint.read_regular(root / "HANDOFF.md")
     meta = checkpoint.parse_handoff(handoff_data.decode("utf-8"))
     include_categories = include_categories or []
-    raw_paths, required, omitted_categories = source_paths(root, meta, include_categories)
+    raw_paths, required, omitted_categories, included_categories = source_paths(
+        root, meta, profile, include_categories,
+    )
     prefix = archive_prefix(root)
     files = []
     total = 0
@@ -416,7 +476,8 @@ def create(project, output, approved=False, include_categories=None):
     result = verify(output)
     result.update({
         "created": True,
-        "included_categories": sorted(set(CATEGORIES) if "all" in include_categories else set(include_categories) | {"design-ui"}),
+        "profile": profile,
+        "included_categories": included_categories,
         "output": os.fspath(output),
     })
     return result
@@ -460,7 +521,7 @@ def verify(bundle):
         if canonical(manifest) != manifest_raw:
             fail("Bundle manifest is not canonical.")
         required_keys = {"schema", "created_at", "project", "branch", "commit", "fingerprint", "handoff", "files", "omitted"}
-        if not isinstance(manifest, dict) or set(manifest) != required_keys or manifest["schema"] not in {1, SCHEMA}:
+        if not isinstance(manifest, dict) or set(manifest) != required_keys or manifest["schema"] not in {1, 2, SCHEMA}:
             fail("Bundle manifest schema is invalid.")
         if (
             not all(isinstance(manifest[key], str) for key in ("created_at", "project", "branch", "commit", "fingerprint", "handoff"))
@@ -564,6 +625,7 @@ def main(argv=None):
     create_parser.add_argument("--project", required=True)
     create_parser.add_argument("--output", required=True)
     create_parser.add_argument("--approve-overwrite", action="store_true")
+    create_parser.add_argument("--profile", choices=sorted(PROFILES), default="runnable")
     create_parser.add_argument("--include-category", action="append", choices=[*CATEGORIES, "all"], default=[])
     verify_parser = commands.add_parser("verify")
     verify_parser.add_argument("--bundle", required=True)
@@ -572,7 +634,9 @@ def main(argv=None):
         if args.command == "analyze":
             result = analyze(args.project)
         elif args.command == "create":
-            result = create(args.project, args.output, args.approve_overwrite, args.include_category)
+            result = create(
+                args.project, args.output, args.approve_overwrite, args.include_category, args.profile,
+            )
         else:
             result = verify(args.bundle)
         print(json.dumps(result, sort_keys=True))

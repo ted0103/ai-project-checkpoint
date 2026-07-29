@@ -292,7 +292,7 @@ class CheckpointTests(unittest.TestCase):
         skill=Path(__file__).parents[1]/"skills/project-checkpoint/SKILL.md"; text=skill.read_text()
         front=text.split("---",2)[1]
         self.assertIn("\nname: project-checkpoint\n",front); self.assertIn("\ndescription:",front)
-        self.assertIn("save progress",front); self.assertIn("continue from HANDOFF.md",front)
+        self.assertIn("save progress",front); self.assertIn("resume from HANDOFF.md",front); self.assertIn("checkpoint here",front); self.assertIn("checkpoint else",front)
         agent=(skill.parent/"agents/openai.yaml").read_text()
         self.assertIn('display_name: "Project Checkpoint"',agent); self.assertIn('short_description: "Save portable, integrity-checked project state"',agent); self.assertIn('$project-checkpoint',agent)
         self.assertNotIn("python3 scripts/checkpoint.py",text); self.assertIn('<python> "<checkpoint.py>"',text); self.assertIn('<python> "<portable.py>"',text); self.assertIn("Python 3.10+",text); self.assertIn("another AI",text); self.assertIn("Reconcile every claim",text); self.assertIn("repository-verified",text); self.assertIn("potentially stale",text); self.assertIn("OS temporary directory outside",text); self.assertIn("verification_current",text)
@@ -337,30 +337,45 @@ class CheckpointTests(unittest.TestCase):
             path=self.root/relative; path.parent.mkdir(parents=True,exist_ok=True); path.write_text(content)
         cp.publish(self.root,{**self.draft,"references":["ignored-reference.md"]})
         analysis=portable.analyze(self.root)
-        self.assertEqual(analysis["auto_categories"],["design-ui"]); self.assertEqual(analysis["categories"]["design-ui"]["file_count"],1)
-        self.assertEqual(analysis["categories"]["assets"]["file_count"],1); self.assertEqual(analysis["categories"]["release"]["file_count"],1)
+        self.assertEqual(analysis["default_profile"],"runnable"); self.assertEqual(analysis["categories"]["design-ui"]["file_count"],1)
+        self.assertEqual(analysis["categories"]["runtime-assets"]["file_count"],1); self.assertEqual(analysis["categories"]["release"]["file_count"],1)
+        self.assertEqual(analysis["profiles"]["ui"]["file_count"],3); self.assertEqual(analysis["profiles"]["runnable"]["file_count"],9)
         bundle=Path(self.temp.name)/"project.zip"; result=portable.create(self.root,bundle)
-        self.assertTrue(result["verified"]); self.assertEqual(result["file_count"],3); self.assertEqual(result["included_categories"],["design-ui"])
+        self.assertTrue(result["verified"]); self.assertEqual(result["file_count"],9); self.assertEqual(result["profile"],"runnable")
+        self.assertEqual(result["included_categories"],["config","design-ui","docs","runtime-assets","source","tests"])
         verified=portable.verify(bundle); self.assertEqual(verified["sha256"],result["sha256"])
         with zipfile.ZipFile(bundle) as archive:
             names=set(archive.namelist())
             self.assertIn("repo/HANDOFF.md",names); self.assertIn("repo/app/index.html",names); self.assertIn("repo/ignored-reference.md",names)
-            self.assertNotIn("repo/tracked.txt",names); self.assertNotIn("repo/untracked.txt",names); self.assertNotIn("repo/assets/hero.png",names)
-            self.assertNotIn("repo/src/core.py",names); self.assertNotIn("repo/tests/test_core.py",names); self.assertNotIn("repo/release/old.zip",names)
+            self.assertIn("repo/tracked.txt",names); self.assertIn("repo/untracked.txt",names); self.assertIn("repo/assets/hero.png",names)
+            self.assertIn("repo/src/core.py",names); self.assertIn("repo/tests/test_core.py",names); self.assertNotIn("repo/release/old.zip",names)
             self.assertIn("repo/.project-checkpoint/START_HERE.md",names)
-        selected=Path(self.temp.name)/"selected.zip"; selected_result=portable.create(self.root,selected,include_categories=["source","tests"])
+        selected=Path(self.temp.name)/"selected.zip"; selected_result=portable.create(self.root,selected,include_categories=["source","tests"],profile="ui")
         self.assertEqual(selected_result["included_categories"],["design-ui","source","tests"])
         with zipfile.ZipFile(selected) as archive:
             names=set(archive.namelist()); self.assertIn("repo/src/core.py",names); self.assertIn("repo/tests/test_core.py",names); self.assertNotIn("repo/assets/hero.png",names)
+        ui=Path(self.temp.name)/"ui.zip"; ui_result=portable.create(self.root,ui,profile="ui")
+        self.assertEqual(ui_result["file_count"],3); self.assertEqual(ui_result["included_categories"],["design-ui"])
         with self.assertRaisesRegex(cp.CheckpointError,"overwrite"): portable.create(self.root,bundle)
         cli=lambda *args: json.loads(subprocess.run([sys.executable,os.fspath(PORTABLE_SCRIPT),*args],check=True,stdout=subprocess.PIPE,text=True).stdout)
-        self.assertTrue(cli("verify","--bundle",os.fspath(bundle))["verified"]); self.assertEqual(cli("analyze","--project",os.fspath(self.root))["auto_categories"],["design-ui"])
+        self.assertTrue(cli("verify","--bundle",os.fspath(bundle))["verified"]); self.assertEqual(cli("analyze","--project",os.fspath(self.root))["default_profile"],"runnable")
 
-    def test_portable_schema_one_bundle_still_verifies(self):
+    def test_runnable_profile_preserves_active_non_release_assets(self):
+        asset=self.root/"references/visual.png"; asset.parent.mkdir(); asset.write_text("old"); git(self.root,"add","."); git(self.root,"commit","-qm","asset")
+        cp.publish(self.root,self.draft); clean_bundle=Path(self.temp.name)/"clean.zip"; portable.create(self.root,clean_bundle)
+        with zipfile.ZipFile(clean_bundle) as archive: self.assertNotIn("repo/references/visual.png",archive.namelist())
+        asset.write_text("new"); cp.publish(self.root,self.draft); dirty_bundle=Path(self.temp.name)/"dirty.zip"; portable.create(self.root,dirty_bundle)
+        with zipfile.ZipFile(dirty_bundle) as archive: self.assertIn("repo/references/visual.png",archive.namelist())
+
+    def test_portable_legacy_bundles_still_verify(self):
         cp.publish(self.root,self.draft); bundle=Path(self.temp.name)/"legacy.zip"
         with mock.patch.object(portable,"SCHEMA",1):
             portable.create(self.root,bundle,include_categories=["all"])
         self.assertEqual(portable.verify(bundle)["file_count"],2)
+        selected=Path(self.temp.name)/"selected-v2.zip"
+        with mock.patch.object(portable,"SCHEMA",2):
+            portable.create(self.root,selected,profile="ui")
+        self.assertEqual(portable.verify(selected)["file_count"],1)
 
     def test_portable_bundle_refuses_secret_filename_and_content(self):
         for name,content in (("credentials.json","{}"),("token.txt","ghp_abcdefghijklmnop")):
