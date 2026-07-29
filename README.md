@@ -1,10 +1,10 @@
 # github/ai-project-checkpoint
 
-**Say `checkpoint`. Resume from one compact, integrity-checked Markdown file.**
+**Say `checkpoint`. Resume from one compact, integrity-checked, branch-aware Markdown file.**
 
-[v0.1.0](https://github.com/ted0103/ai-project-checkpoint/releases/tag/v0.1.0) · Python 3.10+ · Windows, macOS, and Linux · MIT
+[Releases](https://github.com/ted0103/ai-project-checkpoint/releases) · Python 3.10+ · Windows, macOS, and Linux · MIT
 
-Project Checkpoint is a portable Agent Skill for Git projects. It turns the useful state of an AI coding task into one bounded `HANDOFF.md`, then checks that handoff against the repository before another task resumes.
+Project Checkpoint is a portable Agent Skill for Git projects. It turns the useful state of an AI coding task into one bounded `HANDOFF.md`, then validates that handoff and explains how the current branch relates to it before another AI continues.
 
 No daemon. No cloud account. No transcript dump. The runtime is Python’s standard library plus Git.
 
@@ -24,7 +24,15 @@ Inside a Git project:
 checkpoint
 ```
 
-The skill resolves one explicit worktree, inspects its Git state, reconciles the task narrative with observed evidence, and atomically replaces its own `HANDOFF.md`.
+The skill resolves one explicit worktree and atomically writes an owned `HANDOFF.md` containing:
+
+- the current goal and state;
+- built, in-progress, and blocked capabilities with evidence;
+- active or superseded decisions with reasons;
+- acceptance criteria, observed verification, risks, and open questions;
+- one exact next action and a small later remainder.
+
+It records operational understanding, not every function or the conversation transcript.
 
 In a fresh task:
 
@@ -32,7 +40,19 @@ In a fresh task:
 resume project
 ```
 
-The skill validates the handoff and current repository state before returning only the recovered goal, current condition, and exact next action. If the repository changed, it reports evidence-supported drift instead of pretending the checkpoint is fresh.
+Resume validates the handoff, returns the complete structured context, and classifies the repository:
+
+| Status | Meaning |
+| --- | --- |
+| `fresh` | Exact saved branch, commit, and working state |
+| `inherited` | Same commit and working state on a newly created branch |
+| `advanced` | Current commit descends from the checkpoint |
+| `drifted` | Working state changed at the saved commit |
+| `rewound` | Current commit is behind the checkpoint |
+| `diverged` | Saved and current commits have different descendants |
+| `unknown` | Git cannot prove the relationship, such as in a shallow clone |
+
+For known commit relationships, resume reports ahead/behind counts and a bounded changed-path list. It never claims that earlier verification covers later commits.
 
 You can also invoke `$project-checkpoint` explicitly.
 
@@ -41,13 +61,15 @@ You can also invoke `$project-checkpoint` explicitly.
 | Risk | Guardrail |
 | --- | --- |
 | Resuming the wrong project | Requires one explicit Git worktree; discovery is bounded and never trusts an ancestor repository alone |
-| Stale repository context | Records the branch, commit, bounded manifest, and a content-sensitive Git fingerprint |
-| A hand-edited checkpoint | Verifies the generated prose digest and hidden metadata before resume |
+| Losing branch context | Classifies exact, inherited, advanced, rewound, and diverged histories with Git evidence |
+| Forgetting delivered behavior | Carries a concise capability and acceptance ledger instead of a noisy symbol inventory |
+| Losing discussion outcomes | Carries binding decisions, reasons, open questions, risks, and remainder |
+| A hand-edited checkpoint | Verifies generated prose and canonical hidden metadata before resume |
 | Unsafe file references | Accepts only repository-relative regular files; rejects symlinks and boundary escapes |
 | Overwriting someone else’s handoff | Refuses an unowned `HANDOFF.md` without approval for that exact path |
 | Context bloat | Caps the handoff at 120 lines, 1,000 words, and 24 KiB |
 
-Checkpointing records Git identity, current state, decisions, observed verification, risks, and one executable next action. Narrative claims remain agent-reconciled context—not machine-certified truth. Potential-secret detection is deliberately conservative and heuristic.
+Git state and file integrity are machine-checked. Narrative truth is agent-reconciled context, so volatile facts outside the repository must be marked as potentially stale. Potential-secret detection is conservative and heuristic.
 
 ## Why one file
 
@@ -57,7 +79,7 @@ The file is portable, reviewable, replaceable, and easy to commit or transfer wi
 
 ## Reliability
 
-The test suite covers fresh and drifted resumes, prose and metadata tampering, unsafe references, overwrite races, size ceilings, secret-shaped text, bounded hashing, submodules, non-UTF-8 paths, and Windows path behavior. CI runs on Windows, macOS, and Ubuntu with Python 3.10 and 3.13.
+The test suite covers branch inheritance, descendant/rewound/diverged histories, structured context round-trips, fresh and dirty resumes, prose and metadata tampering, unsafe references, overwrite races, size ceilings, secret-shaped text, bounded hashing, submodules, non-UTF-8 paths, and Windows path behavior. CI runs on Windows, macOS, and Ubuntu with Python 3.10 and 3.13.
 
 ```bash
 python -m unittest discover -s tests -v
