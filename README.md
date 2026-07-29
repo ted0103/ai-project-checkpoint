@@ -13,7 +13,7 @@
 
 </div>
 
-Project Checkpoint is a portable [Agent Skill](skills/project-checkpoint/SKILL.md) for Git projects. It captures the state needed to continue an AI coding task in one compact `HANDOFF.md`, then validates that file against the repository before another task resumes.
+Project Checkpoint is a portable [Agent Skill](skills/project-checkpoint/SKILL.md) for Git projects. It captures task state in `HANDOFF.md` and packages the actual working source into a verified ZIP that another AI can open without the original repository.
 
 No daemon, cloud account, transcript archive, or runtime dependency beyond Python's standard library and Git.
 
@@ -31,6 +31,7 @@ Project Checkpoint preserves that operational context without copying the conver
 - risks, open questions, and a small later remainder;
 - one exact next action;
 - branch, commit, working-tree manifest, and content-and-mode-sensitive fingerprint.
+- a portable source snapshot containing tracked and non-ignored untracked files.
 
 | Capability | Plain handoff prompt | Project Checkpoint |
 | --- | --- | --- |
@@ -38,6 +39,7 @@ Project Checkpoint preserves that operational context without copying the conver
 | Detect branch and commit drift | No | Yes |
 | Detect dirty-file content or executable-mode drift | No | Yes |
 | Detect later prose edits | No | Yes |
+| Transfer the working source to another AI | No | Yes |
 | Require a service or account | No | No |
 
 ## Install
@@ -61,7 +63,7 @@ Inside the Git project you want to preserve, tell your agent:
 checkpoint
 ```
 
-The skill inspects the selected worktree, reconciles the task narrative with repository evidence, and atomically writes `HANDOFF.md`.
+The skill inspects the selected worktree, reconciles the task narrative with repository evidence, atomically writes `HANDOFF.md`, and creates a verified source ZIP outside the project. Upload the ZIP—not `HANDOFF.md` alone—when the next AI cannot access the repository.
 
 In a new task, open the same project and say:
 
@@ -80,6 +82,17 @@ The skill validates the checkpoint, explains how the current branch relates to t
 3. Reconcile agent-written context with repository and task evidence.
 4. Sanitize, validate, and atomically replace the skill-owned `HANDOFF.md`.
 5. Embed canonical metadata and a digest that detects later prose edits.
+6. Package tracked files, non-ignored untracked files, and handoff references into a verified ZIP.
+
+### Portable bundle
+
+The ZIP contains the working source plus:
+
+- `.project-checkpoint/START_HERE.md` with concise resume instructions;
+- `HANDOFF.md` with task and Git identity;
+- `.project-checkpoint/bundle.json` with canonical file hashes, sizes, modes, and archive identity.
+
+It omits `.git`, Git history, deleted paths, and unreferenced ignored files. Bundle creation refuses stale handoffs, unsafe paths, submodule directories, likely secret files or credentials, and accidental overwrites.
 
 ### Resume
 
@@ -110,24 +123,26 @@ Known commit relationships include ahead/behind counts and a bounded changed-pat
 | Hand-edited checkpoint | Verifies generated prose and canonical hidden metadata |
 | Unsafe references | Accepts repository-relative regular files; rejects symlinks and boundary escapes |
 | Accidental overwrite | Refuses an unowned `HANDOFF.md` without approval for that exact path |
+| Incomplete AI transfer | Bare checkpoints create both the handoff and a verified source ZIP |
+| Secret export | Excludes ignored files and rejects likely secret filenames or credentials |
 | Context bloat | Caps the handoff at 120 lines, 1,000 words, and 24 KiB |
-| Unbounded inspection | Caps individual files at 512 MiB and aggregate data at 2 GiB; rejects captured Git output over 16 MiB or inspection over 30 seconds |
+| Unbounded work | Caps individual files at 512 MiB and aggregate data at 2 GiB; caps archive entries at 20,000; rejects captured Git output over 16 MiB or inspection over 30 seconds |
 
 > [!IMPORTANT]
 > Repository state and handoff integrity are machine-checked. Agent-written narrative remains reconciled context, not certified truth. External facts may become stale, and secret detection is deliberately conservative. The digest detects edits but is not an adversarial signature.
 
 > [!NOTE]
-> Checkpointing does not run tests, stage files, commit, push, message agents, sync to a service, or support non-Git projects.
+> Checkpointing does not run project tests, stage files, commit, push, message agents, sync to a service, or support non-Git projects. Portable ZIPs carry a source snapshot, not Git history.
 
 ## Project scope
 
 Project Checkpoint handles deliberate continuity between coding tasks. Tools such as [OpenMOSS/claude-codex-handoff](https://github.com/OpenMOSS/claude-codex-handoff) handle live asynchronous coordination, messaging, and process control. They solve different layers and can be used together.
 
-The single-file design keeps a checkpoint portable, reviewable, replaceable, and easy to commit or transfer with the project.
+The compact handoff keeps local resumes fast; the source ZIP makes cross-tool resumes self-contained.
 
 ## Development
 
-The test suite covers structured context round-trips, schema-1 compatibility, branch inheritance, advanced/rewound/diverged histories, content and executable-mode drift, tampering, unsafe references, overwrite races, size and time ceilings, submodules, non-UTF-8 paths, and Windows path behavior. CI runs Python 3.10 and 3.13 on Windows, macOS, and Ubuntu.
+The test suite covers structured context round-trips, schema-1 compatibility, branch inheritance, advanced/rewound/diverged histories, content and executable-mode drift, tampering, unsafe references, overwrite races, size and time ceilings, submodules, non-UTF-8 paths, Windows path behavior, portable-bundle contents, credential refusal, corruption detection, and overwrite safety. CI runs Python 3.10 and 3.13 on Windows, macOS, and Ubuntu.
 
 ```bash
 python -m unittest discover -s tests -v
