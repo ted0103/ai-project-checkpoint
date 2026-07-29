@@ -54,6 +54,15 @@ class CheckpointTests(unittest.TestCase):
         self.assertNotEqual(first["fingerprint"],second["fingerprint"])
         self.assertNotEqual(first["manifest"][0]["index"],second["manifest"][0]["index"])
 
+    @unittest.skipUnless(os.name == "posix", "POSIX executable modes")
+    def test_executable_mode_changes_evidence_for_an_already_dirty_file(self):
+        path=self.root/"tracked.txt"; path.chmod(0o644); path.write_text("dirty\n"); first=cp.inspect(self.root)
+        cp.publish(self.root,self.draft)
+        path.chmod(0o755); second=cp.inspect(self.root)
+        self.assertNotEqual(first["fingerprint"],second["fingerprint"])
+        self.assertNotEqual(first["manifest"][0]["mode"],second["manifest"][0]["mode"])
+        resumed=cp.resume(self.root); self.assertEqual(resumed["resume_status"],"drifted"); self.assertIn("tracked.txt",resumed["changed_paths"])
+
     def test_unmerged_stage_blob_identities_affect_evidence(self):
         git(self.root,"checkout","-qb","side"); (self.root/"tracked.txt").write_text("side\n"); git(self.root,"commit","-am","side","-q")
         git(self.root,"checkout","-q",self.initial_branch); (self.root/"tracked.txt").write_text("main\n"); git(self.root,"commit","-am","main","-q")
@@ -138,10 +147,20 @@ class CheckpointTests(unittest.TestCase):
             with self.assertRaisesRegex(cp.CheckpointError, "2 GiB"): cp.inspect(self.root)
         with self.assertRaisesRegex(cp.CheckpointError, "30 seconds"): cp.safe_hash(self.root, b"large", 0, cp.time.monotonic()-1)
 
+    def test_git_timeout_and_output_limits(self):
+        (self.root/"noise").write_text("x")
+        with self.assertRaisesRegex(cp.CheckpointError,"Git output exceeds"):
+            cp.run_git(self.root,"status","--porcelain",max_output=1)
+        expired=subprocess.TimeoutExpired(["git"],1)
+        with mock.patch.object(cp.subprocess,"run",side_effect=expired):
+            with self.assertRaisesRegex(cp.CheckpointError,"30-second"):
+                cp.run_git(self.root,"status",deadline=cp.time.monotonic()+1)
+
     def test_publish_resume_and_handoff_changes_do_not_drift(self):
         evidence = cp.publish(self.root, self.draft)
         text = (self.root/"HANDOFF.md").read_text(encoding="utf-8"); self.assertLessEqual(len(text.splitlines()),120); self.assertLessEqual(len(text.encode()),cp.MAX_HANDOFF)
         resumed=cp.resume(self.root); self.assertTrue(resumed["fresh"]); self.assertEqual(resumed["resume_status"],"fresh"); self.assertNotIn("metadata",resumed); self.assertEqual(resumed["goal"],"Ship v0.1."); self.assertEqual(resumed["next_action"],"Run the unit tests.")
+        self.assertTrue(resumed["verification_current"])
         self.assertEqual(resumed["capabilities"],self.draft["capabilities"]); self.assertEqual(resumed["decisions"],self.draft["decisions"]); self.assertEqual(resumed["acceptance_criteria"],self.draft["acceptance_criteria"]); self.assertEqual(resumed["verification"],self.draft["verification"]); self.assertEqual(resumed["open_questions"],self.draft["open_questions"]); self.assertEqual(resumed["remainder"],self.draft["remainder"])
         (self.root/"HANDOFF.md").write_text(text, encoding="utf-8")
         self.assertEqual(evidence["fingerprint"], cp.inspect(self.root)["fingerprint"])
@@ -150,13 +169,13 @@ class CheckpointTests(unittest.TestCase):
 
     def test_new_commit_drift(self):
         cp.publish(self.root,self.draft); git(self.root,"commit","--allow-empty","-qm","empty")
-        empty=cp.resume(self.root); self.assertEqual(empty["resume_status"],"advanced"); self.assertEqual(empty["changed_paths"],[])
+        empty=cp.resume(self.root); self.assertEqual(empty["resume_status"],"advanced"); self.assertEqual(empty["changed_paths"],[]); self.assertFalse(empty["verification_current"])
         (self.root/"x").write_text("x"); git(self.root,"add","x"); git(self.root,"commit","-qm","drift")
         result=cp.resume(self.root); self.assertFalse(result["fresh"]); self.assertEqual(result["resume_status"],"advanced"); self.assertEqual(result["branch_relation"],"advanced"); self.assertEqual((result["ahead"],result["behind"]),(2,0)); self.assertTrue(result["complete_path_comparison"]); self.assertIn("x",result["changed_paths"]); self.assertNotEqual(result["saved_commit"],result["current_commit"]); self.assertEqual(result["saved_branch"],result["current_branch"])
 
     def test_new_branch_inherits_checkpoint(self):
         cp.publish(self.root,self.draft); git(self.root,"checkout","-qb","other")
-        result=cp.resume(self.root); self.assertEqual(result["resume_status"],"inherited"); self.assertEqual(result["branch_relation"],"branch-created"); self.assertEqual((result["ahead"],result["behind"]),(0,0)); self.assertEqual(result["changed_paths"],[]); self.assertTrue(result["complete_path_comparison"])
+        result=cp.resume(self.root); self.assertEqual(result["resume_status"],"inherited"); self.assertEqual(result["branch_relation"],"branch-created"); self.assertEqual((result["ahead"],result["behind"]),(0,0)); self.assertEqual(result["changed_paths"],[]); self.assertTrue(result["complete_path_comparison"]); self.assertTrue(result["verification_current"])
         (self.root/"tracked.txt").write_text("changed")
         drifted=cp.resume(self.root); self.assertEqual(drifted["resume_status"],"drifted"); self.assertEqual(drifted["branch_relation"],"branch-created"); self.assertIn("tracked.txt",drifted["changed_paths"])
 
@@ -204,7 +223,7 @@ class CheckpointTests(unittest.TestCase):
         (self.root/"PLAN.md").write_text("locked"); (self.root/"doc.md").write_text("doc")
         draft={**self.draft,"references":["doc.md"]}; cp.publish(self.root,draft); self.assertEqual(cp.parse_handoff((self.root/"HANDOFF.md").read_text(encoding="utf-8"))["plan"],"PLAN.md")
         (self.root/"link.md").symlink_to("doc.md")
-        for ref in ("link.md","../outside"):
+        for ref in ("link.md","../outside",".git/config"):
             with self.assertRaises(cp.CheckpointError): cp.validate_refs(self.root,[ref])
         (self.root/"dir").mkdir(); (self.root/"dir/real.md").write_text("x"); (self.root/"alias").symlink_to("dir",target_is_directory=True)
         with self.assertRaisesRegex(cp.CheckpointError,"symlinks"): cp.validate_refs(self.root,["alias/real.md"])
@@ -213,7 +232,8 @@ class CheckpointTests(unittest.TestCase):
 
     def test_required_sections_placeholders_secret_and_size_limits(self):
         cp.publish(self.root,self.draft); text=(self.root/"HANDOFF.md").read_text(encoding="utf-8")
-        with self.assertRaisesRegex(cp.CheckpointError,"section"): cp.validate_handoff(text.replace("## Identity","## Missing"))
+        for section in ("Identity","Capability state","Acceptance criteria","Open questions"):
+            with self.assertRaisesRegex(cp.CheckpointError,"section"): cp.validate_handoff(text.replace(f"## {section}","## Missing"))
         with self.assertRaisesRegex(cp.CheckpointError,"placeholder"): cp.render(self.root,{**self.draft,"goal":"TODO"},cp.inspect(self.root))
         with self.assertRaisesRegex(cp.CheckpointError,"secret"): cp.render(self.root,{**self.draft,"goal":"api_key=supersecretvalue"},cp.inspect(self.root))
         with mock.patch.object(cp,"MAX_HANDOFF",100):
@@ -231,7 +251,7 @@ class CheckpointTests(unittest.TestCase):
         for draft in ([], {**self.draft,"decisions":"no"}, {**self.draft,"capabilities":[1]}, {**self.draft,"extra":1}):
             with self.assertRaises(cp.CheckpointError): cp.render(self.root,draft,cp.inspect(self.root))
         cp.publish(self.root,self.draft); meta=cp.parse_handoff((self.root/"HANDOFF.md").read_text(encoding="utf-8"))
-        for change in ({"commit":3},{"manifest":{}},{"path_total":"1"},{"path_total":1},{"plan":"OTHER.md"},{"extra":1}):
+        for change in ({"schema":[]},{"commit":3},{"manifest":{}},{"path_total":"1"},{"path_total":1},{"plan":"OTHER.md"},{"extra":1}):
             bad={**meta,**change}
             with self.assertRaises(cp.CheckpointError): cp.validate_metadata(bad)
 
@@ -239,19 +259,35 @@ class CheckpointTests(unittest.TestCase):
         (self.root/"odd ü.txt").write_text("x"); data=cp.inspect(self.root); text=cp.render(self.root,self.draft,data); meta=cp.parse_handoff(text); item=meta["manifest"][0]
         self.assertNotIn(item["index"], cp.prose_without_meta(text)); self.assertNotIn(item["content"], cp.prose_without_meta(text)); self.assertIn(f"`??` `{item['path']}`", text)
         cp.validate_metadata({**meta,"manifest":[{**item,"status":"T."}]})
-        for change in ({"path_b64":item["path_b64"]+"="},{"path":"wrong"},{"status":"bad"},{"index":"no"},{"content":"file:no"}):
+        for change in ({"path_b64":item["path_b64"]+"="},{"path":"wrong"},{"status":"bad"},{"index":"no"},{"content":"file:no"},{"mode":"bad"}):
             bad={**meta,"manifest":[{**item,**change}]}
             with self.assertRaises(cp.CheckpointError): cp.validate_metadata(bad)
         bad={**meta,"manifest":[{**item,"old_path":"orphan"}]}
         with self.assertRaises(cp.CheckpointError): cp.validate_metadata(bad)
 
+    def test_schema_one_handoff_without_new_sections_still_resumes(self):
+        evidence=cp.inspect(self.root)
+        legacy={**evidence,"fingerprint":evidence["legacy_fingerprint"],"manifest":[{k:v for k,v in item.items() if k!="mode"} for item in evidence["manifest"]]}
+        with mock.patch.object(cp,"SCHEMA",1):
+            original=cp.render(self.root,self.draft,legacy)
+        meta=cp.parse_handoff(original); lines=original.splitlines()
+        for section in ("Capability state","Acceptance criteria","Open questions"):
+            start=lines.index(f"## {section}"); end=next((i for i in range(start+1,len(lines)) if lines[i].startswith("## ")),len(lines))
+            del lines[start:end]
+        legacy_text="\n".join(lines)+"\n"; meta["prose_sha256"]=cp.hashlib.sha256(cp.prose_without_meta(legacy_text).encode()).hexdigest()
+        old_line=next(line for line in legacy_text.splitlines() if line.startswith(cp.META_PREFIX))
+        legacy_text=legacy_text.replace(old_line,cp.META_PREFIX+cp.b64(cp.canonical(meta))+" -->",1)
+        (self.root/"HANDOFF.md").write_text(legacy_text,encoding="utf-8")
+        resumed=cp.resume(self.root); self.assertEqual(resumed["schema"],1); self.assertTrue(resumed["fresh"]); self.assertEqual(resumed["capabilities"],[])
+
     def test_skill_manifest_without_yaml_dependency(self):
         skill=Path(__file__).parents[1]/"skills/project-checkpoint/SKILL.md"; text=skill.read_text()
         front=text.split("---",2)[1]
         self.assertIn("\nname: project-checkpoint\n",front); self.assertIn("\ndescription:",front)
+        self.assertIn("save progress",front); self.assertIn("continue from HANDOFF.md",front)
         agent=(skill.parent/"agents/openai.yaml").read_text()
         self.assertIn('display_name: "Project Checkpoint"',agent); self.assertIn('short_description: "Save and resume integrity-checked project state"',agent); self.assertIn('$project-checkpoint',agent)
-        self.assertNotIn("python3 scripts/checkpoint.py",text); self.assertIn('<python> "<checkpoint.py>"',text); self.assertIn("Python 3.10+",text); self.assertIn("Reconcile every claim",text); self.assertIn("repository-verified",text); self.assertIn("potentially stale",text); self.assertIn("OS temporary directory outside",text)
+        self.assertNotIn("python3 scripts/checkpoint.py",text); self.assertIn('<python> "<checkpoint.py>"',text); self.assertIn("Python 3.10+",text); self.assertIn("Reconcile every claim",text); self.assertIn("repository-verified",text); self.assertIn("potentially stale",text); self.assertIn("OS temporary directory outside",text); self.assertIn("verification_current",text)
 
     def test_absolute_script_cli_inspect_publish_resume(self):
         draft=Path(self.temp.name)/"draft.json"; draft.write_text(json.dumps(self.draft))
