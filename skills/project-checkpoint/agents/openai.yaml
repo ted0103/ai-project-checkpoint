@@ -1,4 +1,4 @@
 interface:
   display_name: "Project Checkpoint"
-  short_description: "Save and resume integrity-checked project state"
-  default_prompt: "Use $project-checkpoint to checkpoint or resume this Git project."
+  short_description: "Save portable, integrity-checked project state"
+  default_prompt: "Use $project-checkpoint to save or resume this Git project, including a portable source bundle."
