@@ -102,9 +102,11 @@ The ZIP contains the selected working set plus:
 
 - `.project-checkpoint/START_HERE.md` with concise resume instructions;
 - `HANDOFF.md` with task and Git identity;
-- `.project-checkpoint/bundle.json` with canonical file hashes, sizes, modes, and archive identity.
+- `.project-checkpoint/bundle.json` with the selected profile and categories, canonical file hashes, sizes, modes, and archive identity.
 
 The runnable profile includes active non-release progress, design/UI, runtime assets and vendor files, source, configuration and lockfiles, tests, documentation, data, and supporting files. Large design/reference assets, non-runtime vendor files, and releases stay out unless explicitly required. The ZIP also omits `.git`, Git history, deleted paths, and ignored files except explicit references. Bundle creation refuses stale handoffs, unsafe paths, submodule directories, likely secret files or credentials, and accidental overwrites.
+
+Selected symlinks must resolve to files carried by the same profile, so a structurally verified bundle cannot silently contain an omitted target. UI-only bundles identify themselves as partial working sets rather than runnable projects.
 
 ### Resume
 
@@ -135,16 +137,17 @@ Known commit relationships include ahead/behind counts and a bounded changed-pat
 | Ambiguous workstream | Asks focused follow-ups and requires approval of the final scope |
 | Other discovered project | Excluded by default; explicit opt-in creates a separate checkpoint |
 | Hand-edited checkpoint | Verifies generated prose and canonical hidden metadata |
+| Conflicting bundle identity | Requires manifest branch, commit, and fingerprint to match `HANDOFF.md` |
 | Unsafe references | Accepts repository-relative regular files; rejects symlinks and boundary escapes |
 | Accidental overwrite | Refuses an unowned `HANDOFF.md` without approval for that exact path |
 | Oversized AI transfer | Includes the runnable working set while excluding large reference assets and releases |
 | Incomplete portable work | Verifies the ZIP, extracts it, and runs a documented safe check from the copy |
-| Secret export | Excludes ignored files and rejects likely secret filenames or credentials |
+| Secret export | Excludes ignored files and rejects likely secret filenames, known token formats, and generic credential assignments |
 | Context bloat | Caps the handoff at 120 lines, 1,000 words, and 24 KiB |
 | Unbounded work | Caps individual files at 512 MiB and aggregate data at 2 GiB; caps archive entries at 20,000; rejects captured Git output over 16 MiB or inspection over 30 seconds |
 
 > [!IMPORTANT]
-> Repository state and handoff integrity are machine-checked. Agent-written narrative remains reconciled context, not certified truth. External facts may become stale, and secret detection is deliberately conservative. The digest detects edits but is not an adversarial signature.
+> Repository state and handoff integrity are machine-checked. Agent-written narrative remains reconciled context, not certified truth. External facts may become stale, and secret detection is deliberately conservative. Verification proves archive self-consistency; it does not authenticate who created a ZIP or establish that included code is safe to execute. The digest detects edits but is not an adversarial signature.
 
 > [!NOTE]
 > Checkpointing never stages, commits, pushes, installs dependencies, deploys, messages agents, syncs to a service, or supports non-Git projects. `checkpoint else` may run an existing local, non-destructive check from the extracted ZIP. Portable ZIPs carry a working set, not Git history.
@@ -157,7 +160,7 @@ The compact handoff keeps local resumes fast; the source ZIP makes cross-tool re
 
 ## Development
 
-The test suite covers structured context round-trips, schema-1 compatibility, branch inheritance, advanced/rewound/diverged histories, content and executable-mode drift, tampering, unsafe references, overwrite races, size and time ceilings, submodules, non-UTF-8 paths, Windows path behavior, portable-bundle contents, credential refusal, corruption detection, and overwrite safety. CI runs Python 3.10 and 3.13 on Windows, macOS, and Ubuntu.
+The test suite covers structured context round-trips, reserved narrative text, schema-1 compatibility, branch inheritance, advanced/rewound/diverged histories, content and executable-mode drift, tampering, unsafe references, overwrite races, size and time ceilings, submodules, non-UTF-8 paths, Windows path behavior, portable profiles, omitted symlink targets, generic credential refusal, bounded metadata reads, internal identity agreement, corruption detection, and overwrite safety. CI runs Python 3.10 and 3.13 on Windows, macOS, and Ubuntu.
 
 ```bash
 python -m unittest discover -s tests -v

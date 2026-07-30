@@ -175,6 +175,12 @@ class CheckpointTests(unittest.TestCase):
         (self.root/"tracked.txt").write_text("drift")
         result=cp.resume(self.root); self.assertFalse(result["fresh"]); self.assertIn("tracked.txt", result["changed_paths"])
 
+    def test_publish_round_trips_reserved_text_and_rejects_structural_headings(self):
+        cp.publish(self.root,{**self.draft,"goal":"META"})
+        self.assertEqual(cp.resume(self.root)["goal"],"META")
+        with self.assertRaisesRegex(cp.CheckpointError,"unexpected or out-of-order"):
+            cp.publish(self.root,{**self.draft,"current_state":"## Injected section"})
+
     def test_new_commit_drift(self):
         cp.publish(self.root,self.draft); git(self.root,"commit","--allow-empty","-qm","empty")
         empty=cp.resume(self.root); self.assertEqual(empty["resume_status"],"advanced"); self.assertEqual(empty["changed_paths"],[]); self.assertFalse(empty["verification_current"])
@@ -357,6 +363,12 @@ class CheckpointTests(unittest.TestCase):
             names=set(archive.namelist()); self.assertIn("repo/src/core.py",names); self.assertIn("repo/tests/test_core.py",names); self.assertNotIn("repo/assets/hero.png",names)
         ui=Path(self.temp.name)/"ui.zip"; ui_result=portable.create(self.root,ui,profile="ui")
         self.assertEqual(ui_result["file_count"],3); self.assertEqual(ui_result["included_categories"],["design-ui"])
+        self.assertEqual(ui_result["profile"],"ui")
+        with zipfile.ZipFile(ui) as archive:
+            guide=archive.read("repo/.project-checkpoint/START_HERE.md").decode()
+            manifest=json.loads(archive.read("repo/.project-checkpoint/bundle.json"))
+        self.assertIn("not a runnable-project guarantee",guide); self.assertNotIn("minimum runnable working set",guide)
+        self.assertEqual(manifest["profile"],"ui"); self.assertEqual(manifest["included_categories"],["design-ui"])
         with self.assertRaisesRegex(cp.CheckpointError,"overwrite"): portable.create(self.root,bundle)
         cli=lambda *args: json.loads(subprocess.run([sys.executable,os.fspath(PORTABLE_SCRIPT),*args],check=True,stdout=subprocess.PIPE,text=True).stdout)
         self.assertTrue(cli("verify","--bundle",os.fspath(bundle))["verified"]); self.assertEqual(cli("analyze","--project",os.fspath(self.root))["default_profile"],"runnable")
@@ -385,6 +397,15 @@ class CheckpointTests(unittest.TestCase):
                 portable.create(self.root,Path(self.temp.name)/f"{name}.zip",include_categories=["all"])
             path.unlink()
 
+    def test_portable_bundle_refuses_generic_secret_assignments_but_allows_placeholders(self):
+        path=self.root/"config.json"; path.write_text('{"api_key":"review-nonplaceholder-value"}')
+        cp.publish(self.root,self.draft)
+        with self.assertRaisesRegex(cp.CheckpointError,"credential assignment"):
+            portable.create(self.root,Path(self.temp.name)/"secret.zip",include_categories=["all"])
+        path.write_text('{"api_key":"YOUR_API_KEY"}'); cp.publish(self.root,self.draft)
+        result=portable.create(self.root,Path(self.temp.name)/"placeholder.zip",include_categories=["all"])
+        self.assertTrue(result["verified"])
+
     def test_portable_paths_are_cross_platform_safe(self):
         for path in (b"../escape",b"CON.txt",b"colon:name",b"back\\slash",b"trailing."):
             with self.assertRaises(cp.CheckpointError): portable.safe_relative(path)
@@ -399,6 +420,16 @@ class CheckpointTests(unittest.TestCase):
         (self.root/"link").unlink(); (self.root/"link").symlink_to("../outside"); cp.publish(self.root,self.draft)
         with self.assertRaisesRegex(cp.CheckpointError,"Escaping symlink"):
             portable.create(self.root,Path(self.temp.name)/"escape.zip",include_categories=["all"])
+
+    @unittest.skipUnless(os.name == "posix", "POSIX symlinks")
+    def test_portable_selected_symlink_requires_its_target(self):
+        target=self.root/"release/required.bin"; target.parent.mkdir(); target.write_text("required")
+        (self.root/"runtime-link").symlink_to("release/required.bin")
+        git(self.root,"add","."); git(self.root,"commit","-qm","symlink"); cp.publish(self.root,self.draft)
+        with self.assertRaisesRegex(cp.CheckpointError,"target omitted"):
+            portable.create(self.root,Path(self.temp.name)/"missing-target.zip")
+        result=portable.create(self.root,Path(self.temp.name)/"complete.zip",include_categories=["release"])
+        self.assertTrue(result["verified"])
 
     def test_portable_verifier_rejects_instruction_and_mode_tampering(self):
         cp.publish(self.root,self.draft); bundle=Path(self.temp.name)/"project.zip"; portable.create(self.root,bundle,include_categories=["all"])
@@ -418,5 +449,16 @@ class CheckpointTests(unittest.TestCase):
             return data
         rewrite(modes,change_mode)
         with self.assertRaisesRegex(cp.CheckpointError,"mode"): portable.verify(modes)
+        identity=Path(self.temp.name)/"identity.zip"
+        def change_identity(info,data):
+            if info.filename.endswith("/bundle.json"):
+                manifest=json.loads(data); manifest["branch"]="different-branch"; return portable.canonical(manifest)
+            return data
+        rewrite(identity,change_identity)
+        with self.assertRaisesRegex(cp.CheckpointError,"identity does not match"):
+            portable.verify(identity)
+        with mock.patch.object(portable,"MAX_MANIFEST",10):
+            with self.assertRaisesRegex(cp.CheckpointError,"manifest exceeds"):
+                portable.verify(bundle)
 
 if __name__ == "__main__": unittest.main()

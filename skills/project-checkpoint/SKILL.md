@@ -66,6 +66,8 @@ Report portable success only when archive verification and the extracted-copy ch
 
 The bundle always contains the generated handoff and referenced regular files even when ignored. The runnable profile carries the minimum working set and omits `.git`, ignored files except references, deleted paths, Git history, large reference assets, non-runtime vendor files, and release artifacts. Creation fails on unsafe paths, submodule directories, likely secret files or credentials, a stale handoff, or an existing output unless the user explicitly approves that exact output with `--approve-overwrite`. Secret lint is heuristic, never guaranteed detection.
 
+The bundle manifest records its selected profile and included categories. Selected symlinks must have their targets in the same bundle; if creation reports an omitted target, include only the required target category and retry. Verification proves structural self-consistency and agreement with `HANDOFF.md`; it does not authenticate the ZIP's creator or establish that included code is safe to execute.
+
 Example:
 
 ```text
@@ -76,7 +78,7 @@ Report success only after publication and, when applicable, portable-bundle veri
 
 ## Resume
 
-When given a portable ZIP instead of a repository, run `<python> "<portable.py>" verify --bundle <bundle.zip>` before opening it. Read `<project>/.project-checkpoint/START_HERE.md`, then `<project>/HANDOFF.md`, then work from the included source tree. The bundle is a selected working set without Git history; do not assume omitted categories are available, invent branch ancestry, or treat saved verification as current after changing files.
+When given a portable ZIP instead of a repository, run `<python> "<portable.py>" verify --bundle <bundle.zip>` before opening it. Verification does not establish origin or make untrusted code safe to run. Read `<project>/.project-checkpoint/START_HERE.md`, then `<project>/HANDOFF.md`, then work from the included source tree. The bundle is a selected working set without Git history; do not assume omitted categories are available, invent branch ancestry, or treat saved verification as current after changing files.
 
 1. Resolve the project again.
 2. Run `<python> "<checkpoint.py>" resume --project <resolved-root>`. Reject invalid metadata, prose edits, unsafe references, or malformed evidence. Use its structured goal, current state, capabilities, decisions, acceptance criteria, verification, risks, open questions, remainder, and next action; do not decode or repeat the hidden metadata comment.

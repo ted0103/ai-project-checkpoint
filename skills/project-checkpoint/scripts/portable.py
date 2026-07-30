@@ -17,8 +17,10 @@ import zipfile
 
 import checkpoint
 
-SCHEMA = 3
+SCHEMA = 4
 MAX_ENTRIES = 20_000
+MAX_MANIFEST = 16 * 1024 * 1024
+MAX_GUIDE = 64 * 1024
 RESERVED = {".project-checkpoint/START_HERE.md", ".project-checkpoint/bundle.json"}
 CATEGORIES = (
     "design-ui", "runtime-assets", "source", "config", "tests", "docs", "data",
@@ -64,15 +66,27 @@ STORED_SUFFIXES = {
 }
 SECRET_FILENAMES = {
     ".env", ".netrc", "credentials", "credentials.json", "id_dsa", "id_ed25519",
-    "id_ecdsa", "id_rsa", "service-account.json",
+    "id_ecdsa", "id_rsa", "service-account.json", "service_account.json",
+    "application_default_credentials.json", "secrets.json", "secrets.yaml", "secrets.yml",
 }
 WINDOWS_DEVICES = {"CON", "PRN", "AUX", "NUL", *{f"COM{i}" for i in range(1, 10)}, *{f"LPT{i}" for i in range(1, 10)}}
 SECRET_BYTES = [
     re.compile(rb"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
-    re.compile(rb"\b(?:ghp_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,}|sk-[A-Za-z0-9_-]{16,}|AKIA[0-9A-Z]{16})\b"),
+    re.compile(rb"\b(?:ghp_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,}|sk-[A-Za-z0-9_-]{16,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{20,}|xox[baprs]-[0-9A-Za-z-]{10,}|ya29\.[0-9A-Za-z_-]{20,})\b"),
     re.compile(rb"(?i)https?://[^\s/@:]+:[^\s/@]+@"),
     re.compile(rb"(?i)(?:^|\n)\s*//[^\n:]+:_authToken\s*=\s*[^\s$][^\s]*"),
 ]
+GENERIC_SECRET_BYTES = re.compile(
+    rb"""(?ix)
+    (?:^|[\n,{])\s*["']?
+    (?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|
+       secret[_-]?(?:access[_-]?)?key|password|passwd|private[_-]?key)
+    ["']?\s*[:=]\s*["']?([^"'\s,}]{8,})
+    """
+)
+PLACEHOLDER_SECRET_BYTES = re.compile(
+    rb"(?i)^(?:\$\{?[A-Z_][A-Z0-9_]*\}?|your[_-].*|(?:example|placeholder|dummy|sample|redacted|changeme|replace[_-]?me)(?:[_-].*)?|.*[_-](?:example|placeholder|dummy|sample|redacted)(?:[_-].*)?)$"
+)
 
 
 def fail(message):
@@ -185,10 +199,40 @@ def selected_paths(paths, required, dirty, profile, include_categories):
     return selected, sorted(omitted), sorted(actual)
 
 
+def validate_selected_symlinks(root, visible, selected):
+    visible_by_name = {safe_relative(raw): raw for raw in visible}
+    selected_names = {safe_relative(raw) for raw in selected}
+    for rel in sorted(selected_names):
+        native = os.path.join(os.fsencode(root), os.fsencode(rel))
+        try:
+            info = os.lstat(native)
+        except FileNotFoundError:
+            continue
+        if not stat.S_ISLNK(info.st_mode):
+            continue
+        target_text = validate_symlink_target(rel, os.fsencode(os.readlink(native)))
+        resolved = posixpath.normpath(posixpath.join(posixpath.dirname(rel), target_text))
+        target_native = os.path.join(os.fsencode(root), os.fsencode(resolved))
+        if not os.path.lexists(target_native):
+            fail(f"Dangling symlink refused: {rel} -> {target_text}")
+        if os.path.isdir(target_native):
+            target_prefix = resolved.rstrip("/") + "/"
+            target_members = {name for name in visible_by_name if name.startswith(target_prefix)}
+            if not target_members:
+                fail(f"Symlink directory target has no Git-visible files: {rel} -> {target_text}")
+            missing = target_members - selected_names
+        else:
+            missing = {resolved} - selected_names
+        if missing:
+            sample = ", ".join(sorted(missing)[:3])
+            fail(f"Symlink target omitted by the selected profile: {rel} -> {target_text}; include {sample}.")
+
+
 def source_paths(root, meta, profile, include_categories):
     paths, required = visible_paths(root, meta)
     dirty = {safe_relative(entry[0]) for entry in checkpoint.status_entries(root)}
     selected, omitted, actual = selected_paths(paths, required, dirty, profile, include_categories)
+    validate_selected_symlinks(root, paths, selected)
     return selected, required, omitted, actual
 
 
@@ -253,6 +297,10 @@ def scan_secret(chunk, tail, path):
     for pattern in SECRET_BYTES:
         if pattern.search(sample):
             fail(f"Potential credential detected in {path}; remove or redact it before bundling.")
+    for match in GENERIC_SECRET_BYTES.finditer(sample):
+        candidate = match.group(1).rstrip(b";")
+        if not PLACEHOLDER_SECRET_BYTES.fullmatch(candidate):
+            fail(f"Potential credential assignment detected in {path}; remove or redact it before bundling.")
     return sample[-512:]
 
 
@@ -366,7 +414,7 @@ def output_unchanged(output, identity):
     ) == identity
 
 
-def start_here(project, schema=SCHEMA):
+def start_here(project, schema=SCHEMA, profile=None, included_categories=None):
     if schema == 1:
         return (
             "# Portable Project Checkpoint\n\n"
@@ -390,15 +438,44 @@ def start_here(project, schema=SCHEMA):
             "Do not claim saved verification is current after editing the source.\n\n"
             f"Project directory: `{project}`\n"
         ).encode()
+    if schema == 3:
+        return (
+            "# Portable Project Checkpoint\n\n"
+            "Open `HANDOFF.md` first. Follow its exact next action and reuse only the setup, run, and "
+            "verification commands recorded there or documented in the included project files.\n\n"
+            "This archive contains the minimum runnable working set: active non-release progress, source, "
+            "configuration, tests, documentation, data, runtime assets, runtime vendor files, and checkpoint "
+            "references. Large design/reference assets and release artifacts may be intentionally absent; "
+            "check `.project-checkpoint/bundle.json` before assuming they exist. `.git`, Git history, deleted "
+            "paths, and Git-ignored files are absent. Do not claim saved verification is current after editing.\n\n"
+            f"Project directory: `{project}`\n"
+        ).encode()
+    categories = ", ".join(included_categories or []) or "checkpoint references only"
+    if profile == "ui":
+        scope = (
+            "This is a UI/style working set, not a runnable-project guarantee. Source, configuration, tests, "
+            "assets, vendor files, or release files may be absent unless listed in the manifest."
+        )
+    elif profile == "all":
+        scope = (
+            "This archive contains every Git-visible file plus checkpoint references. Git history, deleted "
+            "paths, and unreferenced ignored files remain absent."
+        )
+    else:
+        scope = (
+            "This archive contains the selected runnable working set: active non-release progress and the "
+            "source, configuration, tests, documentation, data, runtime assets, runtime vendor files, and "
+            "supporting files present in the manifest. Large reference assets and releases may be absent."
+        )
     return (
         "# Portable Project Checkpoint\n\n"
         "Open `HANDOFF.md` first. Follow its exact next action and reuse only the setup, run, and "
         "verification commands recorded there or documented in the included project files.\n\n"
-        "This archive contains the minimum runnable working set: active non-release progress, source, "
-        "configuration, tests, documentation, data, runtime assets, runtime vendor files, and checkpoint "
-        "references. Large design/reference assets and release artifacts may be intentionally absent; "
-        "check `.project-checkpoint/bundle.json` before assuming they exist. `.git`, Git history, deleted "
-        "paths, and Git-ignored files are absent. Do not claim saved verification is current after editing.\n\n"
+        f"{scope}\n\n"
+        f"Profile: `{profile}`. Included categories: {categories}.\n\n"
+        "Verification proves archive self-consistency, not who created it or whether its code is safe to "
+        "execute. `.git`, Git history, deleted paths, and unreferenced ignored files are absent. Do not claim "
+        "saved verification is current after editing.\n\n"
         f"Project directory: `{project}`\n"
     ).encode()
 
@@ -442,7 +519,7 @@ def create(project, output, approved=False, include_categories=None, profile="ru
                 files.append(item)
             if "HANDOFF.md" not in {item["path"] for item in files}:
                 fail("Portable bundle requires HANDOFF.md.")
-            guide = start_here(prefix, SCHEMA)
+            guide = start_here(prefix, SCHEMA, profile, included_categories)
             zf.writestr(zip_info(f"{prefix}/.project-checkpoint/START_HERE.md", 0o644, time.time()), guide)
             manifest = {
                 "schema": SCHEMA,
@@ -456,10 +533,12 @@ def create(project, output, approved=False, include_categories=None, profile="ru
                 "omitted": [
                     ".git and Git history",
                     "deleted paths",
-                    "Git-ignored files",
+                    "Git-ignored files except explicit checkpoint references",
                     *([f"Git-visible categories not selected: {', '.join(omitted_categories)}"] if omitted_categories else []),
                 ],
             }
+            if SCHEMA >= 4:
+                manifest.update({"profile": profile, "included_categories": included_categories})
             zf.writestr(zip_info(f"{prefix}/.project-checkpoint/bundle.json", 0o644, time.time()), canonical(manifest))
         verify(temporary)
         if checkpoint.resume(root)["resume_status"] != "fresh":
@@ -490,6 +569,25 @@ def validate_zip_path(name):
     return path
 
 
+def read_zip_bounded(zf, name, limit, label):
+    try:
+        info = zf.getinfo(name)
+    except KeyError:
+        fail(f"Bundle {label} is missing.")
+    if info.file_size > limit:
+        fail(f"Bundle {label} exceeds the {limit}-byte limit.")
+    data = bytearray()
+    with zf.open(info) as source:
+        while len(data) <= limit:
+            chunk = source.read(min(65536, limit + 1 - len(data)))
+            if not chunk:
+                break
+            data.extend(chunk)
+    if len(data) > limit:
+        fail(f"Bundle {label} exceeds the {limit}-byte limit.")
+    return bytes(data)
+
+
 def verify(bundle):
     bundle = Path(bundle).expanduser()
     bundle = bundle.parent.resolve() / bundle.name
@@ -513,15 +611,17 @@ def verify(bundle):
         manifests = [name for name in names if name.endswith("/.project-checkpoint/bundle.json")]
         if len(manifests) != 1:
             fail("Bundle must contain exactly one canonical manifest.")
-        manifest_raw = zf.read(manifests[0])
+        manifest_raw = read_zip_bounded(zf, manifests[0], MAX_MANIFEST, "manifest")
         try:
             manifest = json.loads(manifest_raw)
         except (UnicodeDecodeError, json.JSONDecodeError) as e:
             raise checkpoint.CheckpointError("Bundle manifest is invalid JSON.") from e
         if canonical(manifest) != manifest_raw:
             fail("Bundle manifest is not canonical.")
-        required_keys = {"schema", "created_at", "project", "branch", "commit", "fingerprint", "handoff", "files", "omitted"}
-        if not isinstance(manifest, dict) or set(manifest) != required_keys or manifest["schema"] not in {1, 2, SCHEMA}:
+        legacy_keys = {"schema", "created_at", "project", "branch", "commit", "fingerprint", "handoff", "files", "omitted"}
+        schema = manifest.get("schema") if isinstance(manifest, dict) else None
+        required_keys = legacy_keys | ({"profile", "included_categories"} if type(schema) is int and schema >= 4 else set())
+        if not isinstance(manifest, dict) or set(manifest) != required_keys or type(schema) is not int or schema not in {1, 2, 3, SCHEMA}:
             fail("Bundle manifest schema is invalid.")
         if (
             not all(isinstance(manifest[key], str) for key in ("created_at", "project", "branch", "commit", "fingerprint", "handoff"))
@@ -530,6 +630,15 @@ def verify(bundle):
             or not all(isinstance(value, str) for value in manifest["omitted"])
         ):
             fail("Bundle manifest field types are invalid.")
+        if schema >= 4 and (
+            not isinstance(manifest["profile"], str)
+            or manifest["profile"] not in PROFILES
+            or not isinstance(manifest["included_categories"], list)
+            or not all(isinstance(category, str) for category in manifest["included_categories"])
+            or manifest["included_categories"] != sorted(set(manifest["included_categories"]))
+            or not all(category in CATEGORIES for category in manifest["included_categories"])
+        ):
+            fail("Bundle profile metadata is invalid.")
         prefix = manifest["project"]
         if not isinstance(prefix, str) or not re.fullmatch(r"[A-Za-z0-9_](?:[A-Za-z0-9._-]*[A-Za-z0-9_])?", prefix):
             fail("Bundle project prefix is invalid.")
@@ -546,7 +655,12 @@ def verify(bundle):
             f"{prefix}/.project-checkpoint/START_HERE.md",
             f"{prefix}/.project-checkpoint/bundle.json",
         }
-        if zf.read(f"{prefix}/.project-checkpoint/START_HERE.md") != start_here(prefix, manifest["schema"]):
+        guide_name = f"{prefix}/.project-checkpoint/START_HERE.md"
+        guide = read_zip_bounded(zf, guide_name, MAX_GUIDE, "resume instructions")
+        expected_guide = start_here(
+            prefix, schema, manifest.get("profile"), manifest.get("included_categories"),
+        )
+        if guide != expected_guide:
             fail("Bundle resume instructions failed integrity verification.")
         info_by_name = {info.filename: info for info in infos}
         total = 0
@@ -601,10 +715,20 @@ def verify(bundle):
         if manifest["handoff"] != "HANDOFF.md" or handoff_name not in names:
             fail("Bundle handoff path is invalid.")
         try:
-            checkpoint.parse_handoff(zf.read(handoff_name).decode("utf-8"))
+            handoff_raw = read_zip_bounded(zf, handoff_name, checkpoint.MAX_HANDOFF, "HANDOFF.md")
+            handoff_meta = checkpoint.parse_handoff(handoff_raw.decode("utf-8"))
         except UnicodeDecodeError as e:
             raise checkpoint.CheckpointError("Bundled HANDOFF.md is not UTF-8.") from e
-    return {
+        if any(manifest[key] != handoff_meta[key] for key in ("branch", "commit", "fingerprint")):
+            fail("Bundle Git identity does not match HANDOFF.md.")
+        if schema >= 4:
+            required_files = {"HANDOFF.md", *handoff_meta["references"]}
+            if handoff_meta.get("plan"):
+                required_files.add(handoff_meta["plan"])
+            actual_categories = sorted({classify_path(rel) for rel in listed - required_files})
+            if manifest["included_categories"] != actual_categories:
+                fail("Bundle included categories do not match its file manifest.")
+    result = {
         "verified": True,
         "bundle": os.fspath(bundle),
         "project": prefix,
@@ -614,6 +738,12 @@ def verify(bundle):
         "source_bytes": total,
         "sha256": archive_digest.hexdigest(),
     }
+    if schema >= 4:
+        result.update({
+            "profile": manifest["profile"],
+            "included_categories": manifest["included_categories"],
+        })
+    return result
 
 
 def main(argv=None):
