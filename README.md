@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="assets/logo.png" width="144" alt="" />
+
 # Project Checkpoint
 
 **Portable, branch-aware continuity for AI coding tasks.**
